@@ -14,54 +14,81 @@ use crate::plates::{generate_plates, height_contribution};
 use crate::rng::Rng;
 
 // --- biome ids ---------------------------------------------------------------
+// A wider palette than the original game: more climate bands, polar ice, a
+// snow line, and separate wetland kinds, so a map reads as a real gradient of
+// biomes rather than a handful of blocks.
 pub const BIOME_OCEAN: u8 = 0;
-pub const BIOME_TUNDRA: u8 = 1;
-pub const BIOME_TAIGA: u8 = 2;
-pub const BIOME_STEPPE: u8 = 3;
-pub const BIOME_PLAINS: u8 = 4;
-pub const BIOME_FOREST: u8 = 5;
-pub const BIOME_DESERT: u8 = 6;
-pub const BIOME_SAVANNAH: u8 = 7;
-pub const BIOME_JUNGLE: u8 = 8;
-pub const BIOME_MOUNTAIN: u8 = 9;
-pub const BIOME_HIGHLAND: u8 = 10;
-pub const BIOME_COASTAL: u8 = 11;
-pub const BIOME_SWAMP: u8 = 12;
+pub const BIOME_ICE: u8 = 1;
+pub const BIOME_TUNDRA: u8 = 2;
+pub const BIOME_ALPINE: u8 = 3;
+pub const BIOME_TAIGA: u8 = 4;
+pub const BIOME_BOREAL: u8 = 5;
+pub const BIOME_STEPPE: u8 = 6;
+pub const BIOME_GRASSLAND: u8 = 7;
+pub const BIOME_PLAINS: u8 = 8;
+pub const BIOME_TEMPERATE_FOREST: u8 = 9;
+pub const BIOME_TEMPERATE_RAINFOREST: u8 = 10;
+pub const BIOME_SHRUBLAND: u8 = 11;
+pub const BIOME_DESERT: u8 = 12;
+pub const BIOME_SAVANNAH: u8 = 13;
+pub const BIOME_MONSOON: u8 = 14;
+pub const BIOME_JUNGLE: u8 = 15;
+pub const BIOME_MOUNTAIN: u8 = 16;
+pub const BIOME_SNOW_PEAK: u8 = 17;
+pub const BIOME_HIGHLAND: u8 = 18;
+pub const BIOME_COASTAL: u8 = 19;
+pub const BIOME_SWAMP: u8 = 20;
+pub const BIOME_MARSH: u8 = 21;
+pub const BIOME_MANGROVE: u8 = 22;
 
 pub fn biome_name(b: u8) -> &'static str {
     match b {
         BIOME_OCEAN => "ocean",
+        BIOME_ICE => "ice",
         BIOME_TUNDRA => "tundra",
+        BIOME_ALPINE => "alpine",
         BIOME_TAIGA => "taiga",
+        BIOME_BOREAL => "boreal forest",
         BIOME_STEPPE => "steppe",
+        BIOME_GRASSLAND => "grassland",
         BIOME_PLAINS => "plains",
-        BIOME_FOREST => "forest",
+        BIOME_TEMPERATE_FOREST => "temperate forest",
+        BIOME_TEMPERATE_RAINFOREST => "temperate rainforest",
+        BIOME_SHRUBLAND => "shrubland",
         BIOME_DESERT => "desert",
         BIOME_SAVANNAH => "savannah",
+        BIOME_MONSOON => "monsoon forest",
         BIOME_JUNGLE => "jungle",
         BIOME_MOUNTAIN => "mountain",
+        BIOME_SNOW_PEAK => "snow peak",
         BIOME_HIGHLAND => "highland",
         BIOME_COASTAL => "coastal",
         BIOME_SWAMP => "swamp",
+        BIOME_MARSH => "marsh",
+        BIOME_MANGROVE => "mangrove",
         _ => "unknown",
     }
 }
 
-// --- biome / climate thresholds (resources.py) ------------------------------
-const MOUNTAIN_RELIEF: f64 = 0.55;
-const HIGHLAND_RELIEF: f64 = 0.38;
+// --- biome / climate thresholds ---------------------------------------------
+const ICE_TEMP: f64 = 0.12; // polar ice caps below this temperature
+const COLD_TEMP: f64 = 0.40; // cold / temperate boundary
+const WARM_TEMP: f64 = 0.60; // temperate / warm boundary
+const SNOW_RELIEF: f64 = 0.78; // relief above which peaks are snow-capped
+const MOUNTAIN_RELIEF: f64 = 0.60;
+const HIGHLAND_RELIEF: f64 = 0.40;
 const COASTAL_REACH: f64 = 3.0;
 const SWAMP_MOISTURE: f64 = 0.68;
 const SWAMP_RELIEF_MAX: f64 = 0.18;
 const SWAMP_WATER_REACH: f64 = 3.0;
-const TEMP_BANDS: [f64; 3] = [0.30, 0.62, 0.82];
-const MOISTURE_BANDS: [f64; 3] = [0.30, 0.48, 0.68];
-// rows: cold / temperate / warm / hot; cols: arid / dry / moist / wet
-const BIOME_MATRIX: [[u8; 4]; 4] = [
-    [BIOME_TUNDRA, BIOME_TUNDRA, BIOME_TAIGA, BIOME_TAIGA],
-    [BIOME_STEPPE, BIOME_PLAINS, BIOME_FOREST, BIOME_FOREST],
-    [BIOME_DESERT, BIOME_SAVANNAH, BIOME_FOREST, BIOME_JUNGLE],
-    [BIOME_DESERT, BIOME_SAVANNAH, BIOME_JUNGLE, BIOME_JUNGLE],
+const TEMP_BANDS: [f64; 3] = [0.40, 0.60, 0.80]; // cold | temperate | warm | hot
+const MOISTURE_BANDS: [f64; 4] = [0.20, 0.40, 0.60, 0.80]; // arid | dry | moderate | moist | wet
+// rows: cold / temperate / warm / hot; cols: arid / dry / moderate / moist / wet
+const BIOME_MATRIX: [[u8; 5]; 4] = [
+    [BIOME_TUNDRA, BIOME_TUNDRA, BIOME_TAIGA, BIOME_TAIGA, BIOME_BOREAL],
+    [BIOME_STEPPE, BIOME_GRASSLAND, BIOME_PLAINS, BIOME_TEMPERATE_FOREST, BIOME_TEMPERATE_RAINFOREST],
+    [BIOME_DESERT, BIOME_SHRUBLAND, BIOME_SAVANNAH, BIOME_MONSOON, BIOME_JUNGLE],
+    [BIOME_DESERT, BIOME_SAVANNAH, BIOME_MONSOON, BIOME_JUNGLE, BIOME_JUNGLE],
 ];
 
 // --- moisture drivers (worldgen.py phase F) ---------------------------------
@@ -112,7 +139,7 @@ pub struct WorldMap {
     pub biome: Vec<u8>,
     pub river: BoolGrid,
     pub lake: BoolGrid,
-    pub ocean_depth: Grid, // ocean cells: steps to nearest land (the shelf); land: 0
+    pub ocean_depth: Grid, // ocean cells: depth below sea level (continuous); land: 0
     pub moisture: Grid,
     pub temperature: Grid,
     pub n_land: usize,
@@ -563,25 +590,39 @@ fn classify_biome(
     water_dist: f64,
     temperature: f64,
 ) -> u8 {
+    // Polar ice caps, then a snow line, beat the climate matrix outright.
+    if temperature < ICE_TEMP {
+        return BIOME_ICE;
+    }
+    if relief > SNOW_RELIEF {
+        return BIOME_SNOW_PEAK;
+    }
     if relief > MOUNTAIN_RELIEF {
         return BIOME_MOUNTAIN;
     }
     if relief > HIGHLAND_RELIEF {
-        return if temperature < TEMP_BANDS[0] {
-            BIOME_TUNDRA
+        // Above the treeline: alpine tundra in the cold, foothills in the warm.
+        return if temperature < COLD_TEMP {
+            BIOME_ALPINE
         } else {
             BIOME_HIGHLAND
         };
     }
     if coast_dist <= COASTAL_REACH {
-        return BIOME_COASTAL;
+        // Tropical wet coastlines are mangrove, not just sand.
+        return if temperature >= WARM_TEMP && moisture > SWAMP_MOISTURE {
+            BIOME_MANGROVE
+        } else {
+            BIOME_COASTAL
+        };
     }
-    if moisture > SWAMP_MOISTURE
-        && relief < SWAMP_RELIEF_MAX
-        && water_dist <= SWAMP_WATER_REACH
-        && temperature >= TEMP_BANDS[0]
-    {
-        return BIOME_SWAMP;
+    // Wet low ground: frozen bog in the cold, swamp in the warm.
+    if moisture > SWAMP_MOISTURE && relief < SWAMP_RELIEF_MAX && water_dist <= SWAMP_WATER_REACH {
+        return if temperature < COLD_TEMP {
+            BIOME_MARSH
+        } else {
+            BIOME_SWAMP
+        };
     }
     let tband = TEMP_BANDS
         .iter()
@@ -797,12 +838,16 @@ fn generate_once(w: i32, h: i32, seed: u64) -> WorldMap {
         }
     }
 
-    // Ocean depth (the continental shelf): steps from land, for shading.
-    let mut land_src = vec![false; (w * h) as usize];
-    for i in 0..land_src.len() {
-        land_src[i] = land.v[i];
+    // Ocean depth, continuous: how far below sea level the floor sits. Using
+    // the elevation field (not a BFS distance from land) avoids the concentric
+    // "contour line" banding a step distance produces in the shallow water, and
+    // the plate/detail noise already gives it natural bathymetry.
+    let mut ocean_depth = Grid::new(w, h, 0.0);
+    for i in 0..ocean_depth.v.len() {
+        if !land.v[i] {
+            ocean_depth.v[i] = (sea_level - v.v[i]).max(0.0);
+        }
     }
-    let ocean_depth = bfs_distance(w, h, &land_src);
 
     // Continent count: land components.
     let mut seen = vec![false; (w * h) as usize];

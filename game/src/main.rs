@@ -25,18 +25,28 @@ struct Terrain(worldgen::WorldMap);
 
 fn biome_base(b: u8) -> (f64, f64, f64) {
     match b {
-        worldgen::BIOME_TUNDRA => (0.78, 0.80, 0.72),
-        worldgen::BIOME_TAIGA => (0.24, 0.42, 0.30),
-        worldgen::BIOME_STEPPE => (0.72, 0.68, 0.42),
-        worldgen::BIOME_PLAINS => (0.55, 0.70, 0.35),
-        worldgen::BIOME_FOREST => (0.20, 0.45, 0.20),
+        worldgen::BIOME_ICE => (0.93, 0.95, 0.98),
+        worldgen::BIOME_TUNDRA => (0.74, 0.77, 0.68),
+        worldgen::BIOME_ALPINE => (0.70, 0.68, 0.64),
+        worldgen::BIOME_TAIGA => (0.22, 0.40, 0.28),
+        worldgen::BIOME_BOREAL => (0.14, 0.32, 0.22),
+        worldgen::BIOME_STEPPE => (0.74, 0.68, 0.40),
+        worldgen::BIOME_GRASSLAND => (0.60, 0.71, 0.34),
+        worldgen::BIOME_PLAINS => (0.48, 0.66, 0.30),
+        worldgen::BIOME_TEMPERATE_FOREST => (0.22, 0.45, 0.20),
+        worldgen::BIOME_TEMPERATE_RAINFOREST => (0.13, 0.38, 0.22),
+        worldgen::BIOME_SHRUBLAND => (0.70, 0.66, 0.42),
         worldgen::BIOME_DESERT => (0.87, 0.78, 0.52),
-        worldgen::BIOME_SAVANNAH => (0.75, 0.72, 0.38),
-        worldgen::BIOME_JUNGLE => (0.16, 0.42, 0.16),
+        worldgen::BIOME_SAVANNAH => (0.76, 0.72, 0.36),
+        worldgen::BIOME_MONSOON => (0.27, 0.51, 0.24),
+        worldgen::BIOME_JUNGLE => (0.11, 0.39, 0.13),
         worldgen::BIOME_MOUNTAIN => (0.55, 0.52, 0.50),
-        worldgen::BIOME_HIGHLAND => (0.62, 0.56, 0.45),
-        worldgen::BIOME_COASTAL => (0.82, 0.78, 0.62),
-        worldgen::BIOME_SWAMP => (0.30, 0.40, 0.28),
+        worldgen::BIOME_SNOW_PEAK => (0.96, 0.97, 0.99),
+        worldgen::BIOME_HIGHLAND => (0.62, 0.56, 0.44),
+        worldgen::BIOME_COASTAL => (0.84, 0.80, 0.64),
+        worldgen::BIOME_SWAMP => (0.26, 0.38, 0.26),
+        worldgen::BIOME_MARSH => (0.40, 0.48, 0.38),
+        worldgen::BIOME_MANGROVE => (0.18, 0.40, 0.28),
         _ => (0.5, 0.5, 0.5),
     }
 }
@@ -66,9 +76,12 @@ fn pixel(map: &worldgen::WorldMap, x: i32, y: i32) -> (f64, f64, f64) {
         return (0.22, 0.42, 0.66);
     }
     if !map.land.get(x, y) {
-        // ocean: the continental shelf — shallow near land, deep far out.
-        let t = (map.ocean_depth.get(x, y) / 24.0).clamp(0.0, 1.0);
-        return (0.30 - 0.27 * t, 0.55 - 0.45 * t, 0.72 - 0.50 * t);
+        // Ocean: continuous depth below sea level, smoothstepped into a
+        // shallow-turquoise → deep-navy ramp. The depth field is the elevation
+        // itself, so there are no discrete contour bands in the shallows.
+        let t = (map.ocean_depth.get(x, y) / map.sea_level).clamp(0.0, 1.0);
+        let t = t * t * (3.0 - 2.0 * t);
+        return (0.34 - 0.31 * t, 0.63 - 0.55 * t, 0.74 - 0.56 * t);
     }
     if map.river.get(x, y) {
         return (0.28, 0.47, 0.72);
