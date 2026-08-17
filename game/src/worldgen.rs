@@ -250,6 +250,47 @@ fn thermal_erosion(height: &mut Grid, land: &BoolGrid, iterations: i32) {
     }
 }
 
+/// Ease the coastline into a gradual coastal plain (land) and shallow shelf
+/// (ocean), so plate boundaries and mountain ranges don't cliff straight into
+/// the sea. Works off the provisional coast, then the caller re-normalises and
+/// re-thresholds.
+fn coastal_ramp(height: &mut Grid, land: &BoolGrid, sea_level: f64) {
+    let (w, h) = (height.w, height.h);
+    let n = (w * h) as usize;
+    let mut ocean = vec![false; n];
+    let mut land_src = vec![false; n];
+    for i in 0..n {
+        ocean[i] = !land.v[i];
+        land_src[i] = land.v[i];
+    }
+    let coast = bfs_distance(w, h, &ocean); // land cells -> steps to open ocean
+    let shelf = bfs_distance(w, h, &land_src); // ocean cells -> steps to land
+
+    const PLAIN: f64 = 16.0; // cells of coastal plain
+    const SHELF: f64 = 14.0; // cells of shallow shelf
+    const EASE: f64 = 0.6; // how far toward the target we pull (keeps relief)
+
+    for i in 0..n {
+        if land.v[i] {
+            let d = coast.v[i];
+            if d <= PLAIN {
+                let t = 1.0 - d / PLAIN;
+                let t = t * t * (3.0 - 2.0 * t); // 1 at the coast, 0 inland
+                let target = sea_level * 1.04; // a low plain just above sea
+                height.v[i] += (target - height.v[i]) * t * EASE;
+            }
+        } else {
+            let d = shelf.v[i];
+            if d <= SHELF {
+                let t = 1.0 - d / SHELF;
+                let t = t * t * (3.0 - 2.0 * t);
+                let target = sea_level * 0.90; // a shallow shelf just below sea
+                height.v[i] += (target - height.v[i]) * t * EASE;
+            }
+        }
+    }
+}
+
 /// Priority-flood fill (Barnes): raise pits so every land cell drains to the
 /// sea. Returns the filled DEM and the set of land cells that became lakes.
 fn priority_flood(height: &Grid, land: &BoolGrid) -> (Grid, BoolGrid) {
@@ -742,7 +783,10 @@ fn generate_once(w: i32, h: i32, seed: u64) -> WorldMap {
     let mr_max = meander_raw.iter().map(|x| (x - mr_mean).abs()).fold(0.0f64, f64::max).max(1e-9);
     for y in 0..h {
         meander[y as usize] = (meander_raw[y as usize] - mr_mean) / mr_max * meander_amp;
-        floor[y as usize] = -(2.8 + 0.8 * floor[y as usize]);
+        // Just below the oceanic base (-0.90), so the wrap reads as ordinary
+        // ocean — no harsh dark band around the map edge — while still
+        // guaranteeing no land straddles the east-west seam.
+        floor[y as usize] = -(1.0 + 0.2 * floor[y as usize]);
     }
     for y in 0..h {
         let p = meander[y as usize];
@@ -762,7 +806,7 @@ fn generate_once(w: i32, h: i32, seed: u64) -> WorldMap {
     for i in 0..v.v.len() {
         v.v[i] = (v.v[i] - lo) / span;
     }
-    let sea_level = percentile(&v.v, 0.58);
+    let mut sea_level = percentile(&v.v, 0.58);
     let mut land = BoolGrid::new(w, h, false);
     for y in 0..h {
         for x in 0..w {
@@ -770,6 +814,32 @@ fn generate_once(w: i32, h: i32, seed: u64) -> WorldMap {
         }
     }
     // Seam safety: sink any land on the wrap columns.
+    for y in 0..h {
+        for &ex in &[0, w - 1] {
+            if land.get(ex, y) {
+                v.set(ex, y, v.min());
+                land.set(ex, y, false);
+            }
+        }
+    }
+    cull_small_islands(&mut v, &mut land, sea_level, 5);
+
+    // 4b. gradual coastline: ease coastal land down into a plain and coastal
+    // ocean up into a shelf, then re-normalise and re-threshold so the coast
+    // is a slope, not a cliff.
+    coastal_ramp(&mut v, &land, sea_level);
+    let (lo, hi) = (v.min(), v.max());
+    let span = (hi - lo).max(1e-9);
+    for i in 0..v.v.len() {
+        v.v[i] = (v.v[i] - lo) / span;
+    }
+    sea_level = percentile(&v.v, 0.58);
+    for y in 0..h {
+        for x in 0..w {
+            land.set(x, y, v.get(x, y) > sea_level);
+        }
+    }
+    // Keep the seam invariant after the ramp (land never straddles the wrap).
     for y in 0..h {
         for &ex in &[0, w - 1] {
             if land.get(ex, y) {

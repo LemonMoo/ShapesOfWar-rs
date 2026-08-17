@@ -73,7 +73,9 @@ fn pixel(map: &worldgen::WorldMap, x: i32, y: i32) -> (f64, f64, f64) {
     let i = (y * map.w + x) as usize;
 
     if map.lake.get(x, y) {
-        return (0.22, 0.42, 0.66);
+        // Freshwater — the same blue-green family as shallow ocean, so inland
+        // water reads as water rather than an unrelated colour.
+        return (0.28, 0.56, 0.70);
     }
     if !map.land.get(x, y) {
         // Ocean: continuous depth below sea level, smoothstepped into a
@@ -84,7 +86,7 @@ fn pixel(map: &worldgen::WorldMap, x: i32, y: i32) -> (f64, f64, f64) {
         return (0.34 - 0.31 * t, 0.63 - 0.55 * t, 0.74 - 0.56 * t);
     }
     if map.river.get(x, y) {
-        return (0.28, 0.47, 0.72);
+        return (0.30, 0.54, 0.70);
     }
     let (r, g, b) = biome_base(map.biome[i]);
     let sh = hillshade(map, x, y, 4.0);
