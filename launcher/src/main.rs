@@ -14,7 +14,6 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 
 use eframe::egui;
 
-const REPO: &str = "LemonMoo/ShapesOfWar-rs";
 const RELEASE_API: &str = "https://api.github.com/repos/LemonMoo/ShapesOfWar-rs/releases/latest";
 const GAME_EXE_NAME: &str = "ShapesOfWar.exe";
 const USER_AGENT: &str = "ShapesOfWarLauncher";

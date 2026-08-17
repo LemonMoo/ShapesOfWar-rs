@@ -13,4 +13,5 @@ pub mod rng;
 pub mod settlement;
 pub mod time;
 pub mod trade;
+pub mod war;
 pub mod worldgen;
