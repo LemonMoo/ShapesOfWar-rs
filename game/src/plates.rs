@@ -397,6 +397,20 @@ pub fn height_contribution(pl: &Plates) -> Grid {
         };
     }
 
+    // Continental shelf: oceanic cells near a continental plate are shallower,
+    // sloping down to the abyssal plain far from land. A flat -0.90 ocean floor
+    // leaves a hard gap to the +0.90 land, which pushes the sea level down into
+    // that gap and turns every coast into a cliff; a gradient spreads the ocean
+    // depth so the sea level (and so land relief) lands where the coast is.
+    let shelf_radius = ((w as f64 * 0.07).round() as i32).max(4);
+    let shelf_dist = capped_distance(w, h, &own_continental, shelf_radius);
+    for i in 0..field.v.len() {
+        if !own_continental[i] {
+            let t = (1.0 - shelf_dist.v[i] / shelf_radius as f64).clamp(0.0, 1.0);
+            field.v[i] += 0.55 * t; // raise toward a shallow shelf near land
+        }
+    }
+
     let add = |field: &mut Grid, kind: u8, amp: f64, pl: &Plates, max_radius: i32| {
         let mask = boundary_mask(&pl.boundaries, kind, pl.w, pl.h);
         if mask.iter().any(|&b| b) {

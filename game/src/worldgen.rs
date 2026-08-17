@@ -783,37 +783,8 @@ fn generate_once(w: i32, h: i32, seed: u64) -> WorldMap {
         v.v[i] += DETAIL_AMPLITUDE * (detail.v[i] - detail_mean);
     }
 
-    // 3. meandering deep-ocean seam at the east-west wrap.
-    let seam_margin = ((w as f64 * 0.03).round() as i32).max(6);
-    let meander_amp = 0.55 * seam_margin as f64;
-    let mut meander = vec![0.0f64; h as usize];
-    let mut floor = vec![0.0f64; h as usize];
-    let mut meander_raw = vec![0.0f64; h as usize];
-    for y in 0..h {
-        meander_raw[y as usize] = 1.0 * crate::noise::value_noise(0.0, y as f64 * 0.006, nseed + 303, None)
-            + 0.45 * crate::noise::value_noise(0.0, y as f64 * 0.012, nseed + 304, None);
-        floor[y as usize] = crate::noise::value_noise(0.0, y as f64 * 0.004, nseed + 404, None);
-    }
-    let mr_mean = meander_raw.iter().sum::<f64>() / h as f64;
-    let mr_max = meander_raw.iter().map(|x| (x - mr_mean).abs()).fold(0.0f64, f64::max).max(1e-9);
-    for y in 0..h {
-        meander[y as usize] = (meander_raw[y as usize] - mr_mean) / mr_max * meander_amp;
-        // Just below the oceanic base (-0.90), so the wrap reads as ordinary
-        // ocean — no harsh dark band around the map edge — while still
-        // guaranteeing no land straddles the east-west seam.
-        floor[y as usize] = -(1.0 + 0.2 * floor[y as usize]);
-    }
-    for y in 0..h {
-        let p = meander[y as usize];
-        for x in 0..w {
-            let mut d = (x as f64 - p).rem_euclid(w as f64);
-            d = d.min(w as f64 - d);
-            let fade = ((d - meander_amp) / (seam_margin as f64 - meander_amp).max(1e-9)).clamp(0.0, 1.0);
-            let fade = fade * fade * (3.0 - 2.0 * fade);
-            let i = (y * w + x) as usize;
-            v.v[i] = v.v[i] * fade + floor[y as usize] * (1.0 - fade);
-        }
-    }
+    // (No east-west ocean seam: the field is periodic in x, so land wraps
+    // across the map edge exactly like the water does.)
 
     // 4. normalise, sea level (land ~40%), land mask.
     let (lo, hi) = (v.min(), v.max());
@@ -826,15 +797,6 @@ fn generate_once(w: i32, h: i32, seed: u64) -> WorldMap {
     for y in 0..h {
         for x in 0..w {
             land.set(x, y, v.get(x, y) > sea_level);
-        }
-    }
-    // Seam safety: sink any land on the wrap columns.
-    for y in 0..h {
-        for &ex in &[0, w - 1] {
-            if land.get(ex, y) {
-                v.set(ex, y, v.min());
-                land.set(ex, y, false);
-            }
         }
     }
     cull_small_islands(&mut v, &mut land, sea_level, 5);
@@ -853,15 +815,6 @@ fn generate_once(w: i32, h: i32, seed: u64) -> WorldMap {
     for y in 0..h {
         for x in 0..w {
             land.set(x, y, v.get(x, y) > sea_level);
-        }
-    }
-    // Keep the seam invariant after the ramp (land never straddles the wrap).
-    for y in 0..h {
-        for &ex in &[0, w - 1] {
-            if land.get(ex, y) {
-                v.set(ex, y, v.min());
-                land.set(ex, y, false);
-            }
         }
     }
     cull_small_islands(&mut v, &mut land, sea_level, 5);

@@ -15,8 +15,8 @@ mod worldgen;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
-const MAP_W: i32 = 512;
-const MAP_H: i32 = 320;
+const MAP_W: i32 = 1024;
+const MAP_H: i32 = 640;
 
 /// The generated world, wrapped so the pure `worldgen` module stays Bevy-free.
 #[derive(Resource)]
