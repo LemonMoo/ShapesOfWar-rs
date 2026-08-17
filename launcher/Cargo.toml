@@ -1,0 +1,10 @@
+[package]
+name = "shapes_of_war_launcher"
+version = "0.0.1"
+edition = "2021"
+description = "Shapes of War launcher — checks for and downloads the latest game build, then launches it."
+
+[dependencies]
+eframe = "0.36"
+ureq = "3"
+serde_json = "1"
