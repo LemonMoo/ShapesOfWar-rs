@@ -114,7 +114,9 @@ fn scatter_seeds(rng: &mut Rng, w: i32, h: i32, n: i32) -> Vec<(f64, f64)> {
 
 fn grow_plate_ids(w: i32, h: i32, seeds: &[(f64, f64)], seed_val: i64) -> Vec<i32> {
     let spacing = w as f64 / (seeds.len() as f64).sqrt().max(1.0);
-    let warp_amp = spacing * 0.35;
+    // A slightly larger warp makes plate territories (and thus coastlines)
+    // twist into more irregular shapes without fragmenting the continents.
+    let warp_amp = spacing * 0.42;
     let warp_oct = periodic_octaves(w, &[(0.010, 1.0), (0.024, 0.4)]);
     let wx = fbm_grid(w, h, seed_val + 501, &warp_oct, None, None);
     let wy = fbm_grid(w, h, seed_val + 907, &warp_oct, None, None);

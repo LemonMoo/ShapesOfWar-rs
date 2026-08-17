@@ -254,7 +254,7 @@ fn thermal_erosion(height: &mut Grid, land: &BoolGrid, iterations: i32) {
 /// (ocean), so plate boundaries and mountain ranges don't cliff straight into
 /// the sea. Works off the provisional coast, then the caller re-normalises and
 /// re-thresholds.
-fn coastal_ramp(height: &mut Grid, land: &BoolGrid, sea_level: f64) {
+fn coastal_ramp(height: &mut Grid, land: &BoolGrid, sea_level: f64, nseed: i64) {
     let (w, h) = (height.w, height.h);
     let n = (w * h) as usize;
     let mut ocean = vec![false; n];
@@ -268,27 +268,40 @@ fn coastal_ramp(height: &mut Grid, land: &BoolGrid, sea_level: f64) {
     let coast = bfs_distance(w, h, &ocean).blur(2, 3); // land -> steps to open ocean
     let shelf = bfs_distance(w, h, &land_src).blur(2, 3); // ocean -> steps to land
 
+    // Fractal detail for coastline roughening: a bay/peninsula-scale wiggle
+    // that breaks up the smooth plate arcs into an irregular shoreline.
+    let rough_oct = periodic_octaves(w, &[(0.07, 1.0), (0.15, 0.55), (0.30, 0.30)]);
+    let rough = fbm_grid(w, h, nseed + 777, &rough_oct, None, None);
+    let rough_mean = rough.mean();
+
     const PLAIN: f64 = 16.0; // cells of coastal plain
     const SHELF: f64 = 14.0; // cells of shallow shelf
     const EASE: f64 = 0.6; // how far toward the target we pull (keeps relief)
+    const ROUGH_RADIUS: f64 = 12.0; // cells over which the shore roughens
+    const ROUGH_AMP: f64 = 0.07; // normalized-height wiggle at the shoreline
 
     for i in 0..n {
+        let d = if land.v[i] { coast.v[i] } else { shelf.v[i] };
+        let rw = if d <= ROUGH_RADIUS {
+            let t = 1.0 - d / ROUGH_RADIUS;
+            t * t * (3.0 - 2.0 * t)
+        } else {
+            0.0
+        };
+        height.v[i] += ROUGH_AMP * (rough.v[i] - rough_mean) * rw;
+
         if land.v[i] {
-            let d = coast.v[i];
             if d <= PLAIN {
                 let t = 1.0 - d / PLAIN;
                 let t = t * t * (3.0 - 2.0 * t); // 1 at the coast, 0 inland
                 let target = sea_level * 1.04; // a low plain just above sea
                 height.v[i] += (target - height.v[i]) * t * EASE;
             }
-        } else {
-            let d = shelf.v[i];
-            if d <= SHELF {
-                let t = 1.0 - d / SHELF;
-                let t = t * t * (3.0 - 2.0 * t);
-                let target = sea_level * 0.90; // a shallow shelf just below sea
-                height.v[i] += (target - height.v[i]) * t * EASE;
-            }
+        } else if d <= SHELF {
+            let t = 1.0 - d / SHELF;
+            let t = t * t * (3.0 - 2.0 * t);
+            let target = sea_level * 0.90; // a shallow shelf just below sea
+            height.v[i] += (target - height.v[i]) * t * EASE;
         }
     }
 }
@@ -826,10 +839,11 @@ fn generate_once(w: i32, h: i32, seed: u64) -> WorldMap {
     }
     cull_small_islands(&mut v, &mut land, sea_level, 5);
 
-    // 4b. gradual coastline: ease coastal land down into a plain and coastal
-    // ocean up into a shelf, then re-normalise and re-threshold so the coast
-    // is a slope, not a cliff.
-    coastal_ramp(&mut v, &land, sea_level);
+    // 4b. gradual + weathered coastline: ease coastal land down into a plain
+    // and coastal ocean up into a shelf, and add a bay/peninsula wiggle. Then
+    // re-normalise + re-threshold: the shelf spreads the ocean's depth range,
+    // which is what keeps the sea level (and so the land relief) balanced.
+    coastal_ramp(&mut v, &land, sea_level, nseed);
     let (lo, hi) = (v.min(), v.max());
     let span = (hi - lo).max(1e-9);
     for i in 0..v.v.len() {
