@@ -323,20 +323,20 @@ pub fn generate_plates(w: i32, h: i32, seed: u64, n_plates: i32) -> Plates {
 /// Multi-source 8-neighbour distance transform capped at `max_radius`, wrap in
 /// x (cylinder topology), no y wrap. Exact BFS (cleaner than the Python's
 /// iterative dilation, same character).
-fn capped_distance(w: i32, h: i32, seeds: &[bool], max_radius: i32) -> Vec<i32> {
-    let mut dist = vec![max_radius; (w * h) as usize];
+fn capped_distance(w: i32, h: i32, seeds: &[bool], max_radius: i32) -> Grid {
+    let mut dist = Grid::new(w, h, max_radius as f64);
     let mut queue = std::collections::VecDeque::new();
     for y in 0..h {
         for x in 0..w {
             if seeds[(y * w + x) as usize] {
-                dist[(y * w + x) as usize] = 0;
+                dist.set(x, y, 0.0);
                 queue.push_back((x, y));
             }
         }
     }
     while let Some((x, y)) = queue.pop_front() {
-        let d = dist[(y * w + x) as usize];
-        if d >= max_radius {
+        let d = dist.get(x, y);
+        if d >= max_radius as f64 {
             continue;
         }
         for &(dx, dy) in &NEIGH8 {
@@ -345,9 +345,8 @@ fn capped_distance(w: i32, h: i32, seeds: &[bool], max_radius: i32) -> Vec<i32> 
             if ny < 0 || ny >= h {
                 continue;
             }
-            let i = (ny * w + nx) as usize;
-            if dist[i] > d + 1 {
-                dist[i] = d + 1;
+            if dist.get(nx, ny) > d + 1.0 {
+                dist.set(nx, ny, d + 1.0);
                 queue.push_back((nx, ny));
             }
         }
@@ -355,10 +354,11 @@ fn capped_distance(w: i32, h: i32, seeds: &[bool], max_radius: i32) -> Vec<i32> 
     dist
 }
 
-fn falloff(dist: &[i32], max_radius: i32) -> Vec<f64> {
-    dist.iter()
+fn falloff(dist: &Grid, max_radius: i32) -> Vec<f64> {
+    dist.v
+        .iter()
         .map(|&d| {
-            let t = (1.0 - d as f64 / max_radius as f64).clamp(0.0, 1.0);
+            let t = (1.0 - d / max_radius as f64).clamp(0.0, 1.0);
             t * t * (3.0 - 2.0 * t)
         })
         .collect()
@@ -398,7 +398,7 @@ pub fn height_contribution(pl: &Plates) -> Grid {
     let add = |field: &mut Grid, kind: u8, amp: f64, pl: &Plates, max_radius: i32| {
         let mask = boundary_mask(&pl.boundaries, kind, pl.w, pl.h);
         if mask.iter().any(|&b| b) {
-            let dist = capped_distance(pl.w, pl.h, &mask, max_radius);
+            let dist = capped_distance(pl.w, pl.h, &mask, max_radius).blur(2, 2);
             let fo = falloff(&dist, max_radius);
             for i in 0..field.v.len() {
                 field.v[i] += amp * fo[i];
@@ -415,7 +415,7 @@ pub fn height_contribution(pl: &Plates) -> Grid {
     // the oceanic side of the same boundary.
     let sub_mask = boundary_mask(&pl.boundaries, CONVERGENT_SUBDUCTION, w, h);
     if sub_mask.iter().any(|&b| b) {
-        let dist = capped_distance(w, h, &sub_mask, max_radius);
+        let dist = capped_distance(w, h, &sub_mask, max_radius).blur(2, 2);
         let fo = falloff(&dist, max_radius);
         for i in 0..field.v.len() {
             let amp = if own_continental[i] {

@@ -263,8 +263,10 @@ fn coastal_ramp(height: &mut Grid, land: &BoolGrid, sea_level: f64) {
         ocean[i] = !land.v[i];
         land_src[i] = land.v[i];
     }
-    let coast = bfs_distance(w, h, &ocean); // land cells -> steps to open ocean
-    let shelf = bfs_distance(w, h, &land_src); // ocean cells -> steps to land
+    // Blur the integer BFS distance into a smooth gradient, so the smoothstep
+    // below doesn't stamp concentric contour bands into the coastal plain/shelf.
+    let coast = bfs_distance(w, h, &ocean).blur(2, 3); // land -> steps to open ocean
+    let shelf = bfs_distance(w, h, &land_src).blur(2, 3); // ocean -> steps to land
 
     const PLAIN: f64 = 16.0; // cells of coastal plain
     const SHELF: f64 = 14.0; // cells of shallow shelf

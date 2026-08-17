@@ -44,6 +44,37 @@ impl Grid {
     pub fn max(&self) -> f64 {
         self.v.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
     }
+
+    /// Box-blur (wrap in x) — turns a discrete step field (e.g. an integer
+    /// BFS distance) into a smooth gradient, so a smoothstep over it no longer
+    /// produces concentric contour bands.
+    pub fn blur(&self, radius: i32, passes: i32) -> Grid {
+        let (w, h) = (self.w, self.h);
+        let mut src = self.clone();
+        let mut dst = Grid::new(w, h, 0.0);
+        for _ in 0..passes {
+            for y in 0..h {
+                for x in 0..w {
+                    let mut sum = 0.0;
+                    let mut cnt = 0.0;
+                    for dy in -radius..=radius {
+                        for dx in -radius..=radius {
+                            let nx = (x + dx).rem_euclid(w);
+                            let ny = y + dy;
+                            if ny < 0 || ny >= h {
+                                continue;
+                            }
+                            sum += src.get(nx, ny);
+                            cnt += 1.0;
+                        }
+                    }
+                    dst.set(x, y, sum / cnt);
+                }
+            }
+            std::mem::swap(&mut src, &mut dst);
+        }
+        src
+    }
 }
 
 /// A grid of booleans (land masks, boundary masks).
