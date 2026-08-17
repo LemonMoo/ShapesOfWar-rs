@@ -1,5 +1,5 @@
 //! `settlement` — one faction, one continuously-producing settlement (port
-//! milestone M2).
+//! milestone M2, running the M3 economy).
 //!
 //! Everything here ports a named piece of the Python game's economy
 //! (`app/world/resources.py` + `app/world/worldgen.py`), rebuilt as
@@ -25,16 +25,22 @@
 //!   `_compute_fertility` (moisture + lowland + water-distance), and the
 //!   `_roll_population` starting roll for a town.
 //!
-//! M2 simplifications, each a conscious deferral to a later milestone:
+//! The M3 economy (`economy` module) slots into `sim_tick` between M2's
+//! production and consumption: production is throttled by storage fullness,
+//! recipes convert the settlement's own stock (Wheat → Flour → Bread,
+//! Logs → Planks, Cotton → Cloth → Clothes, the post-year luxury trickle),
+//! stock spoils at each resource's registry rate, and pools packed past
+//! capacity decay their overage. Consumption pools are now the faithful
+//! registry-derived ones: Food pools the edible crops + Food Products
+//! (Cotton/Fodder are not food), Timber pools Planks + Logs, and Luxury
+//! pools every Luxury Good.
+//!
+//! Remaining deferrals, each a conscious M4+ choice:
 //! - one faction, one settlement (a town), no regions/kingdoms yet — so the
-//!   population-migration term is zero (the Python code defaults a lone
-//!   node's region/kingdom averages to its own wealth) and no coal exists
-//!   for firewood substitution (the hook is marked in `consume`);
-//! - the food pool is the 13 crops only (Python also pools Food Products,
-//!   fish and underworld food — all M3+ production);
-//! - Clothes/Luxury are consumed but not yet produced (M3's conversion
-//!   chains), so they read as a permanent, prosperity-only shortfall — the
-//!   exact state the Python game was in before logistics existed.
+//!   population-migration term is zero and no Coal exists for firewood
+//!   substitution (the hook is marked in `consume`);
+//! - the food pool lacks the Fish / Subterranean members and the extra Food
+//!   Products (Cheese, Meat, …) whose raw inputs no M3 system produces.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -82,7 +88,9 @@ pub const PROSPERITY_SHORTAGE_WEIGHT: [(&str, f64); 4] =
     [("Food", 1.0), ("Firewood", 0.6), ("Clothes", 0.25), ("Timber", 0.25)];
 
 // --- ported constants: value (resources.py BASE_VALUE_BY_TIER) --------------
-pub const BASE_VALUE_BY_TIER: [f64; 6] = [0.0, 2.0, 3.0, 5.0, 9.0, 15.0];
+// The tier table lives in `economy` (M3's registry); the settlement reads it
+// from there.
+pub use crate::economy::BASE_VALUE_BY_TIER;
 
 // --- ported constants: yields (resources.py) --------------------------------
 pub const BASE_CROP_YIELD_PER_CELL: f64 = 10.0;
@@ -226,12 +234,12 @@ pub const CROPS: [Crop; 13] = [
     Crop { name: "Grapes", harvest: Season::Autumn, biomes: &["plains"], affinity: [1.3, 1.1, 0.2, 0.6], fertility_weight: 0.9, rarity: Rarity::Uncommon },
 ];
 
-/// The edible crops — M2's food pool (Python `_FOOD_SOURCES` also pools
-/// Food Products, fish and underworld food; those arrive with M3+).
-pub const FOOD_SOURCES: [&str; 13] = [
-    "Wheat", "Rye", "Barley", "Oats", "Potatoes", "Carrots", "Onions", "Fodder",
-    "Beans", "Peas", "Rice", "Cotton", "Grapes",
-];
+/// The pooled food sources — Python `_FOOD_SOURCES` (edible Food Products +
+/// edible raw Crops), owned by M3's `economy` registry so it can never drift
+/// from it. M2's pool was "the 13 crops"; M3 makes it faithful (no Cotton/
+/// Fodder — the registry flags them non-edible — plus the Flour/Bread the
+/// conversion chains now make).
+pub use crate::economy::FOOD_SOURCES;
 
 /// A Forestry/Mining raw that produces continuously (no growth cycle).
 pub struct Forestry {
@@ -252,8 +260,8 @@ pub const FORESTRY: [Forestry; 2] = [
 ];
 
 /// Timber upkeep is drawn from any structural-wood pool (Python
-/// `_TIMBER_SOURCES`); M2 only produces Logs.
-pub const TIMBER_SOURCES: [&str; 1] = ["Logs"];
+/// `_TIMBER_SOURCES`): raw Logs or the milled Planks the Sawmill now makes.
+pub use crate::economy::TIMBER_SOURCES;
 
 /// Port of `_biome_land_shares`: a resource's rarity-weighted share of a
 /// biome's farmland among the *eligible* resources of its category — so
@@ -520,22 +528,23 @@ pub fn find_start_site(map: &WorldMap) -> (i32, i32) {
 
 // --- production (continuous `rate × dt`) -------------------------------------
 
-/// Gold-equivalent value of `amount` of a resource the M2 settlement
-/// touches (Python `resource_value`, tier table only — no Gold yet).
-pub fn resource_value(name: &str, amount: f64) -> f64 {
-    let tier = match name {
-        "Firewood" | "Logs" => 2,
-        "Clothes" => 4,
-        "Luxury" => 5,
-        _ => 1, // crops
-    };
-    amount * BASE_VALUE_BY_TIER[tier]
-}
-
 /// Per-day production rates for `season` (Python `_crop_yield_core` +
 /// `compute_industry_yield`). Crops only yield during their own Harvest
 /// season; forestry runs every day.
-pub fn production_rates(s: &Settlement, season: Season) -> HashMap<String, f64> {
+///
+/// Returns a `Vec` sorted by resource name — never a `HashMap` — because
+/// Rust's std `HashMap` iterates in a random per-map order and any cross-key
+/// float accumulation in that order would break the sim's determinism
+/// guarantee (M3's `pool_stock` note explains the same rule). The inner
+/// biome sum iterates `biome_counts` sorted for the same reason.
+pub fn production_rates(s: &Settlement, season: Season) -> Vec<(String, f64)> {
+    let mut biomes: Vec<(&str, i32)> = s
+        .biome_counts
+        .iter()
+        .map(|(b, &c)| (b.as_str(), c))
+        .collect();
+    biomes.sort_by(|a, b| a.0.cmp(b.0));
+
     let mut out: HashMap<String, f64> = HashMap::new();
     let climate = s.climate;
     for crop in CROPS.iter() {
@@ -543,7 +552,7 @@ pub fn production_rates(s: &Settlement, season: Season) -> HashMap<String, f64> 
             continue;
         }
         let mut amount = 0.0;
-        for (biome, &cells) in &s.biome_counts {
+        for (biome, cells) in biomes.iter().copied() {
             let share = land_share(biome, crop);
             if share <= 0.0 {
                 continue;
@@ -561,7 +570,7 @@ pub fn production_rates(s: &Settlement, season: Season) -> HashMap<String, f64> 
     }
     for f in FORESTRY.iter() {
         let mut amount = 0.0;
-        for (biome, &cells) in &s.biome_counts {
+        for (biome, cells) in biomes.iter().copied() {
             let share = forestry_share(biome, f);
             if share <= 0.0 {
                 continue;
@@ -577,14 +586,16 @@ pub fn production_rates(s: &Settlement, season: Season) -> HashMap<String, f64> 
             out.insert(f.name.to_string(), amount);
         }
     }
-    out
+    let mut rates: Vec<(String, f64)> = out.into_iter().collect();
+    rates.sort_by(|a, b| a.0.cmp(&b.0));
+    rates
 }
 
 /// Gold value of one day of production (feeds the prosperity health factor).
 pub fn production_value(s: &Settlement, season: Season) -> f64 {
     production_rates(s, season)
         .iter()
-        .map(|(r, a)| resource_value(r, *a))
+        .map(|(r, a)| crate::economy::resource_value(r, *a))
         .sum()
 }
 
@@ -636,16 +647,16 @@ pub fn needs_value(s: &Settlement, season: Season) -> f64 {
     let food = n.get("Food").copied().unwrap_or(0.0) * BASE_VALUE_BY_TIER[3];
     let firewood = n
         .get("Firewood")
-        .map(|v| resource_value("Firewood", *v))
+        .map(|v| crate::economy::resource_value("Firewood", *v))
         .unwrap_or(0.0);
     let clothes = n
         .get("Clothes")
-        .map(|v| resource_value("Clothes", *v))
+        .map(|v| crate::economy::resource_value("Clothes", *v))
         .unwrap_or(0.0);
     let luxury = n.get("Luxury").copied().unwrap_or(0.0) * BASE_VALUE_BY_TIER[5];
     let timber = n
         .get("Timber")
-        .map(|v| resource_value("Logs", *v))
+        .map(|v| crate::economy::resource_value("Logs", *v))
         .unwrap_or(0.0);
     food + firewood + clothes + luxury + timber
 }
@@ -749,7 +760,11 @@ fn update_prosperity(s: &mut Settlement, production_day: f64, needs_day: f64, dt
         (production_day / needs_day).clamp(0.5, 1.5)
     };
     let mut condition = 1.0;
-    for (need, deficit) in &s.prosperity_shortfall {
+    // Deterministic iteration (sorted keys): the shortage factors multiply,
+    // and float multiplication order must not depend on HashMap hashing.
+    let mut shortages: Vec<(&String, &f64)> = s.prosperity_shortfall.iter().collect();
+    shortages.sort_by(|a, b| a.0.cmp(b.0));
+    for (need, deficit) in shortages {
         let w = PROSPERITY_SHORTAGE_WEIGHT
             .iter()
             .find(|(n, _)| n == need)
@@ -773,18 +788,39 @@ fn update_prosperity(s: &mut Settlement, production_day: f64, needs_day: f64, dt
 pub fn sim_tick(s: &mut Settlement, clock: &SimClock, dt: f64) {
     let season = clock.season();
 
-    // 1. produce — stock += rate × dt.
+    // 1. produce — stock += rate × dt, throttled as the destination storage
+    //    pool fills (M3: Python `storage_throttle` — production responds to
+    //    storage, so a full barn tapers the harvest instead of destroying
+    //    the overage after the fact). Firewood is exempt: a winter fuel
+    //    hoard is naturally bounded and must never be squeezed out of a
+    //    full pantry.
     for (res, rate) in production_rates(s, season) {
-        *s.resources.entry(res).or_insert(0.0) += rate * dt;
+        let thr = if res == "Firewood" {
+            1.0
+        } else {
+            crate::economy::storage_throttle(&s.resources, crate::economy::pool(&res))
+        };
+        *s.resources.entry(res).or_insert(0.0) += rate * dt * thr;
     }
 
-    // 2. consume — needs × dt from storage, grace counters in continuous days.
+    // 2. convert — processed goods from this settlement's own stock (M3):
+    //    Wheat → Flour → Bread, Logs → Planks, Cotton → Cloth → Clothes,
+    //    and (after a full year, at a trickle) the luxuries.
+    crate::economy::convert(&mut s.resources, clock.seconds, dt);
+
+    // 3. spoil + overflow — every resource decays at its registry
+    //    spoil_rate, and a pool packed past capacity decays the overage on
+    //    top of that (M3).
+    crate::economy::spoil_and_overflow(&mut s.resources, dt);
+
+    // 4. consume — needs × dt from storage, grace counters in continuous
+    //    days.
     let needs_map = needs(s, season);
     let mut shortfall: HashMap<String, f64> = HashMap::new();
     let mut luxury_fulfilled = 0.0;
 
     let food_needed = needs_map.get("Food").copied().unwrap_or(0.0) * dt;
-    let food_had = consume_from_pool(&mut s.resources, &FOOD_SOURCES, food_needed);
+    let food_had = consume_from_pool(&mut s.resources, FOOD_SOURCES, food_needed);
     if food_needed > 0.0 && food_had < food_needed {
         s.days_without_food += dt;
         let deficit = (food_needed - food_had) / food_needed;
@@ -809,10 +845,10 @@ pub fn sim_tick(s: &mut Settlement, clock: &SimClock, dt: f64) {
                 *s.resources.get_mut("Firewood").unwrap() -= wood_had;
             }
             // Python's coal-substitution branch: no Coal is produced until
-            // M3, so a forest-poor town's winter fuel is the scrounge below.
+            // the Mining milestone, so a forest-poor town's winter fuel is
+            // the scrounge below.
             if wood_had < wood_needed {
-                let scrounged = (wood_needed - wood_had)
-                    * firewood_scrounge_fraction(s);
+                let scrounged = (wood_needed - wood_had) * firewood_scrounge_fraction(s);
                 wood_had += scrounged;
             }
             if wood_needed > 0.0 && wood_had < wood_needed {
@@ -847,7 +883,7 @@ pub fn sim_tick(s: &mut Settlement, clock: &SimClock, dt: f64) {
     }
 
     let timber_needed = needs_map.get("Timber").copied().unwrap_or(0.0) * dt;
-    let timber_had = consume_from_pool(&mut s.resources, &TIMBER_SOURCES, timber_needed);
+    let timber_had = consume_from_pool(&mut s.resources, TIMBER_SOURCES, timber_needed);
     if timber_needed > 0.0 && timber_had < timber_needed {
         shortfall.insert(
             "Timber".to_string(),
@@ -855,16 +891,11 @@ pub fn sim_tick(s: &mut Settlement, clock: &SimClock, dt: f64) {
         );
     }
 
+    // Luxury is drawn from the pooled Luxury Goods (Python `_LUXURY_GOODS`):
+    // any one of Wine/Beer/Furniture/… satisfies the need, biggest stockpile
+    // first.
     let luxury_needed = needs_map.get("Luxury").copied().unwrap_or(0.0) * dt;
-    let luxury_had = s
-        .resources
-        .get("Luxury")
-        .copied()
-        .unwrap_or(0.0)
-        .min(luxury_needed);
-    if luxury_had > 0.0 {
-        *s.resources.get_mut("Luxury").unwrap() -= luxury_had;
-    }
+    let luxury_had = consume_from_pool(&mut s.resources, crate::economy::LUXURY_GOODS, luxury_needed);
     if luxury_needed > 0.0 {
         luxury_fulfilled = luxury_had / luxury_needed;
     }
@@ -872,10 +903,10 @@ pub fn sim_tick(s: &mut Settlement, clock: &SimClock, dt: f64) {
     s.prosperity_shortfall = shortfall;
     s.prosperity_luxury = luxury_fulfilled;
 
-    // 3. demographics — growth, gated on the grace counters.
+    // 5. demographics — growth, gated on the grace counters.
     grow_population(s, dt);
 
-    // 4. prosperity — eased toward this day's target.
+    // 6. prosperity — eased toward this day's target.
     update_prosperity(s, production_value(s, season), needs_value(s, season), dt);
 }
 
@@ -933,8 +964,13 @@ fn year_summary(
     }
     last.0 = year;
     for s in &q {
+        let space = s
+            .resources
+            .iter()
+            .map(|(r, v)| v * crate::economy::bulk(r))
+            .sum::<f64>();
         println!(
-            "[year {}] {} — pop {:.0} (adults {:.0}) / max {:.0}, prosperity {:.0}, food {:.1}, firewood {:.1}, logs {:.1}",
+            "[year {}] {} — pop {:.0} (adults {:.0}) / max {:.0}, prosperity {:.0}, food {:.1}, firewood {:.1}, logs {:.1}, planks {:.1}, clothes {:.1}, storage {:.0}",
             year,
             s.name,
             s.population,
@@ -944,6 +980,9 @@ fn year_summary(
             s.resources.get("Wheat").copied().unwrap_or(0.0),
             s.resources.get("Firewood").copied().unwrap_or(0.0),
             s.resources.get("Logs").copied().unwrap_or(0.0),
+            s.resources.get("Planks").copied().unwrap_or(0.0),
+            s.resources.get("Clothes").copied().unwrap_or(0.0),
+            space,
         );
     }
 }
@@ -1000,14 +1039,26 @@ mod tests {
             "population must be positive, got {}",
             s.population
         );
-        // seasonal pattern: food stock must rise across a harvest season and
-        // be lower before the first harvest than after it — the classic
-        // crop cycle. sample[0] is end of Spring (pre-harvest), later
-        // samples are post-harvest.
-        if samples.len() >= 2 {
+        // seasonal pattern: food production follows the crop cycle — the
+        // larder fills across the Summer+Autumn harvests and drains between
+        // them. M2 asserted unbounded growth; M3's storage cap + spoilage
+        // bound the steady state BY DESIGN (production throttles, overage
+        // decays), so the cycle itself is the invariant: each complete
+        // year's Winter-start stock (post-harvest) must sit far above the
+        // following Summer-start stock (post-drawdown).
+        // samples[i] = start of season i, cycling Spring..Winter per year.
+        let seasons_per_year = 4usize;
+        let n_years = samples.len() / seasons_per_year;
+        assert!(n_years >= 2, "not enough seasonal samples: {:?}", samples);
+        for y in 0..n_years - 1 {
+            let winter_start = samples[y * seasons_per_year + 3];
+            let next_summer = samples[(y + 1) * seasons_per_year + 1];
             assert!(
-                samples[samples.len() - 1] > samples[0] + 100.0,
-                "food stock should grow across harvests: {:?}",
+                winter_start > next_summer + 100.0,
+                "harvest must refill the larder: year {} winter {:.1} vs next summer {:.1} (samples {:?})",
+                y + 1,
+                winter_start,
+                next_summer,
                 samples
             );
         }

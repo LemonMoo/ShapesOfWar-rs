@@ -1,16 +1,19 @@
-//! Shapes of War — Rust core, milestone 2: time + settlement.
+//! Shapes of War — Rust core, milestones 2-3: time + settlement, running
+//! the M3 economy.
 //!
 //! M1's worldgen is still here and rendered the same way, but the world now
 //! *lives*: a continuous `SimClock` ticks at a fixed 10 Hz, seasons are
-//! derived from it, and one faction's town produces and consumes
-//! continuously on the map (see `time` and `settlement` in the library
-//! crate). The HUD shows the clock, the town's demographics/prosperity/
-//! stocks, its per-day production and needs, and its living conditions; the
-//! Regenerate button makes a new world *and* re-places the town on it.
+//! derived from it, and one faction's town produces, converts, stores and
+//! consumes continuously on the map (see `time`, `settlement` and `economy`
+//! in the library crate). The HUD shows the clock, the town's demographics/
+//! prosperity/stocks, its storage pools, per-day production/conversion and
+//! needs, and its living conditions; the Regenerate button makes a new world
+//! *and* re-places the town on it.
 
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
+use shapes_of_war::economy;
 use shapes_of_war::settlement::{self, needs, production_rates, Settlement};
 use shapes_of_war::time::{self, SimClock};
 use shapes_of_war::worldgen;
@@ -433,6 +436,37 @@ fn hud_text(clock: &SimClock, s: &Settlement, faction: &str) -> String {
         "Stock — Food {:.1} · Firewood {:.1} · Logs {:.1}",
         food, fw, logs
     ));
+
+    // M3 storage: bulk-weighted occupancy of each typed pool vs its town cap.
+    let pools = [
+        ("granary", economy::StorageClass::Household),
+        ("warehouse", economy::StorageClass::Durable),
+        ("vault", economy::StorageClass::Other),
+        ("barn", economy::StorageClass::Feed),
+    ];
+    let mut storage_bits: Vec<String> = pools
+        .iter()
+        .map(|(name, p)| {
+            let used = economy::pool_stock(&s.resources, *p);
+            let cap = economy::pool_capacity(*p);
+            format!("{name} {used:.0}/{cap:.0}")
+        })
+        .collect();
+    storage_bits.sort();
+    lines.push(format!("Storage — {}", storage_bits.join(" · ")));
+
+    // M3 conversion: what the settlement's recipes would convert today.
+    let conv = economy::conversion_rates(&s.resources, clock.seconds);
+    let mut cbits: Vec<String> = conv
+        .iter()
+        .map(|(out, per_day)| format!("{out} +{per_day:.1}/d"))
+        .collect();
+    cbits.sort();
+    lines.push(if cbits.is_empty() {
+        "Converting — nothing (no recipe inputs in stock)".to_string()
+    } else {
+        format!("Converting — {}", cbits.join(", "))
+    });
 
     let rates = production_rates(s, season);
     let mut prod: Vec<String> = rates

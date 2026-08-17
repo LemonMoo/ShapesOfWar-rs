@@ -4,6 +4,7 @@
 //! tests and examples import the modules from here exactly the way the
 //! Python project's `dev/` scripts imported the `app.world` package.
 
+pub mod economy;
 pub mod grid;
 pub mod noise;
 pub mod plates;

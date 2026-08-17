@@ -1,4 +1,6 @@
-//! Debug: print the M2 settlement's site + year-by-year state on a fixed seed.
+//! Debug: print the settlement's site + year-by-year state on a fixed seed,
+//! now including the M3 economy (conversion, storage, spoilage).
+use shapes_of_war::economy;
 use shapes_of_war::settlement::*;
 use shapes_of_war::time::{Season, SimClock};
 use shapes_of_war::worldgen;
@@ -32,8 +34,18 @@ fn main() {
                 .iter()
                 .map(|r| s.resources.get(*r).copied().unwrap_or(0.0))
                 .sum();
+            let storage: f64 = s
+                .resources
+                .iter()
+                .map(|(r, v)| v * economy::bulk(r))
+                .sum();
+            let mut conv: Vec<String> = economy::conversion_rates(&s.resources, seconds)
+                .iter()
+                .map(|(o, d)| format!("{o}:{d:.1}/d"))
+                .collect();
+            conv.sort();
             println!(
-                "year {} day {:.0}: pop {:.0} adults {:.0} hunger {:.1}d cold {:.1}d food {:.1} fw {:.1} logs {:.1} prosperity {:.1}",
+                "year {} day {:.0}: pop {:.0} adults {:.0} hunger {:.1}d cold {:.1}d food {:.1} fw {:.1} logs {:.1} planks {:.1} clothes {:.1} wine {:.1} storage {:.0} | converting: {}",
                 y,
                 seconds,
                 s.population,
@@ -43,7 +55,15 @@ fn main() {
                 food,
                 s.resources.get("Firewood").copied().unwrap_or(0.0),
                 s.resources.get("Logs").copied().unwrap_or(0.0),
-                s.prosperity
+                s.resources.get("Planks").copied().unwrap_or(0.0),
+                s.resources.get("Clothes").copied().unwrap_or(0.0),
+                s.resources.get("Wine").copied().unwrap_or(0.0),
+                storage,
+                if conv.is_empty() {
+                    "—".to_string()
+                } else {
+                    conv.join(" ")
+                }
             );
         }
     }
