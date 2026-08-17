@@ -1,19 +1,19 @@
-//! Shapes of War — Rust core, milestone 1: natural world generation.
+//! Shapes of War — Rust core, milestone 2: time + settlement.
 //!
-//! The walking skeleton's sine-blob map is gone. `worldgen::generate` runs the
-//! full terrain pipeline (tectonic plates → domain-warped elevation → sea
-//! level → erosion → rivers/lakes → climate → biome) and this renders it as a
-//! single relief-shaded (hillshade + coastal shelf) image — the 2.5D direction
-//! made visible, with elevation as a first-class field.
-
-mod grid;
-mod noise;
-mod plates;
-mod rng;
-mod worldgen;
+//! M1's worldgen is still here and rendered the same way, but the world now
+//! *lives*: a continuous `SimClock` ticks at a fixed 10 Hz, seasons are
+//! derived from it, and one faction's town produces and consumes
+//! continuously on the map (see `time` and `settlement` in the library
+//! crate). The HUD shows the clock, the town's demographics/prosperity/
+//! stocks, its per-day production and needs, and its living conditions; the
+//! Regenerate button makes a new world *and* re-places the town on it.
 
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+
+use shapes_of_war::settlement::{self, needs, production_rates, Settlement};
+use shapes_of_war::time::{self, SimClock};
+use shapes_of_war::worldgen;
 
 const MAP_W: i32 = 1024;
 const MAP_H: i32 = 640;
@@ -33,6 +33,14 @@ struct MapView {
 /// Marker on the "Regenerate" button.
 #[derive(Component)]
 struct RegenerateButton;
+
+/// Marker on the settlement-marker sprite (positioned from the sim each frame).
+#[derive(Component)]
+struct SettlementMarker;
+
+/// Marker on the HUD text (rebuilt each frame).
+#[derive(Component)]
+struct HudText;
 
 fn biome_base(b: u8) -> (f64, f64, f64) {
     match b {
@@ -114,14 +122,18 @@ fn main() {
     log_map(&map);
 
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins((
+            DefaultPlugins,
+            time::TimePlugin,
+            settlement::SettlementPlugin,
+        ))
         .insert_resource(Terrain(map))
         .insert_resource(MapView {
             handle: Handle::default(),
             seed,
         })
         .add_systems(Startup, setup)
-        .add_systems(Update, regenerate)
+        .add_systems(Update, (regenerate, update_hud, sync_marker))
         .run();
 }
 
@@ -143,6 +155,28 @@ fn log_map(map: &worldgen::WorldMap) {
     println!("biomes: {}", s.join("  "));
 }
 
+fn log_settlement(s: &Settlement) {
+    let mut biomes: Vec<String> = s
+        .biome_counts
+        .iter()
+        .map(|(b, c)| format!("{b}x{c}"))
+        .collect();
+    biomes.sort();
+    println!(
+        "settlement: {} at ({}, {})  climate={:?}  fertility={:.2}  pop {:.0} (adults {:.0}, children {:.0}) / max {:.0}",
+        s.name,
+        s.pos.0,
+        s.pos.1,
+        s.climate,
+        s.fertility_frac,
+        s.population,
+        s.adults,
+        s.children,
+        s.max_population
+    );
+    println!("settlement: catchment biomes: {}", biomes.join(" "));
+}
+
 fn build_image(map: &worldgen::WorldMap) -> Image {
     let (w, h) = (map.w, map.h);
     let mut data = vec![0u8; (w * h * 4) as usize];
@@ -160,6 +194,35 @@ fn build_image(map: &worldgen::WorldMap) -> Image {
         Extent3d {
             width: w as u32,
             height: h as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        bevy::asset::RenderAssetUsages::default(),
+    )
+}
+
+/// A small gold-on-black dot that marks the town on the map.
+fn build_marker_image() -> Image {
+    let size = 12u32;
+    let mut data = vec![0u8; (size * size * 4) as usize];
+    for y in 0..size {
+        for x in 0..size {
+            let border = x == 0 || y == 0 || x == size - 1 || y == size - 1;
+            let i = ((y * size + x) * 4) as usize;
+            if border {
+                data[i..i + 3].copy_from_slice(&[20, 20, 20]);
+            } else {
+                data[i..i + 3].copy_from_slice(&[255, 200, 60]);
+            }
+            data[i + 3] = 255;
+        }
+    }
+    Image::new(
+        Extent3d {
+            width: size,
+            height: size,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
@@ -189,6 +252,20 @@ fn setup(
         Transform::from_xyz(0.0, 0.0, 0.0),
     ));
 
+    // The town + its marker dot.
+    let s = Settlement::spawn(map, view.seed);
+    log_settlement(&s);
+    commands.spawn(s);
+    commands.spawn((
+        Sprite {
+            image: images.add(build_marker_image()),
+            custom_size: Some(Vec2::splat(14.0)),
+            ..default()
+        },
+        Transform::from_xyz(0.0, 0.0, 1.0),
+        SettlementMarker,
+    ));
+
     // Regenerate button, top-left.
     commands
         .spawn((
@@ -216,6 +293,30 @@ fn setup(
                 TextColor(Color::WHITE),
             ));
         });
+
+    // HUD panel, bottom-left.
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(12.0),
+                bottom: Val::Px(12.0),
+                padding: UiRect::all(Val::Px(10.0)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.08, 0.10, 0.14, 0.90)),
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: FontSize::Px(14.0),
+                    ..default()
+                },
+                TextColor(Color::srgba(0.85, 0.87, 0.90, 1.0)),
+                HudText,
+            ));
+        });
 }
 
 fn regenerate(
@@ -223,6 +324,8 @@ fn regenerate(
     mut images: ResMut<Assets<Image>>,
     mut terrain: ResMut<Terrain>,
     mut view: ResMut<MapView>,
+    mut commands: Commands,
+    settlement_entity: Query<Entity, With<Settlement>>,
 ) {
     if !interaction.iter().any(|i| matches!(i, Interaction::Pressed)) {
         return;
@@ -232,6 +335,146 @@ fn regenerate(
     let map = worldgen::generate(MAP_W, MAP_H, view.seed);
     log_map(&map);
     let image = build_image(&map);
-    images.insert(view.handle.id(), image);
+    let _ = images.insert(view.handle.id(), image);
     terrain.0 = map;
+
+    // The town is re-placed on the new world.
+    for e in &settlement_entity {
+        commands.entity(e).despawn();
+    }
+    let s = Settlement::spawn(&terrain.0, view.seed);
+    log_settlement(&s);
+    commands.spawn(s);
+}
+
+/// Keep the marker dot glued to the town's map cell.
+fn sync_marker(
+    mut marker: Query<&mut Transform, With<SettlementMarker>>,
+    settlement: Query<&Settlement>,
+    terrain: Res<Terrain>,
+) {
+    for mut t in &mut marker {
+        if let Some(s) = settlement.iter().next() {
+            let map = &terrain.0;
+            t.translation = Vec3::new(
+                s.pos.0 as f32 - map.w as f32 / 2.0,
+                map.h as f32 / 2.0 - s.pos.1 as f32,
+                1.0,
+            );
+        }
+    }
+}
+
+fn food_stock(s: &Settlement) -> f64 {
+    settlement::FOOD_SOURCES
+        .iter()
+        .map(|r| s.resources.get(*r).copied().unwrap_or(0.0))
+        .sum()
+}
+
+fn status_line(s: &Settlement) -> String {
+    let mut bits: Vec<String> = Vec::new();
+    let grace = settlement::STARVATION_GRACE_DAYS;
+    if s.days_without_food > grace {
+        bits.push("STARVING — losing population".to_string());
+    } else if s.days_without_food > 0.0 {
+        bits.push(format!(
+            "Hungry ({:.0}/{} grace days)",
+            s.days_without_food, grace
+        ));
+    } else {
+        bits.push("Fed".to_string());
+    }
+    let fgrace = settlement::FREEZE_GRACE_DAYS;
+    if s.days_without_firewood > fgrace {
+        bits.push("FREEZING — losing population".to_string());
+    } else if s.days_without_firewood > 0.0 {
+        bits.push(format!(
+            "Cold ({:.0}/{} grace days)",
+            s.days_without_firewood, fgrace
+        ));
+    } else {
+        bits.push("Warm".to_string());
+    }
+    let short: Vec<&str> = s.prosperity_shortfall.keys().map(|k| k.as_str()).collect();
+    if !short.is_empty() {
+        bits.push(format!("Short: {}", short.join(", ")));
+    }
+    bits.join(" · ")
+}
+
+fn hud_text(clock: &SimClock, s: &Settlement, faction: &str) -> String {
+    let season = clock.season();
+    let mut lines: Vec<String> = Vec::new();
+
+    let day_night = if clock.is_day() { "Day" } else { "Night" };
+    let season_day = (clock.day_of_year() as f64 % time::TURNS_PER_SEASON).ceil() as i64;
+    lines.push(format!(
+        "{} — Day {} of {} · {} day {}/{} ({})",
+        clock.year(),
+        clock.day_of_year(),
+        100,
+        season.name(),
+        season_day,
+        time::TURNS_PER_SEASON,
+        day_night
+    ));
+
+    lines.push(format!(
+        "{} (town) — {}   Pop {:.0} (adults {:.0}, children {:.0}) / max {:.0}",
+        s.name, faction, s.population, s.adults, s.children, s.max_population
+    ));
+    lines.push(format!("Prosperity {:.1}", s.prosperity));
+
+    let food = food_stock(s);
+    let fw = s.resources.get("Firewood").copied().unwrap_or(0.0);
+    let logs = s.resources.get("Logs").copied().unwrap_or(0.0);
+    lines.push(format!(
+        "Stock — Food {:.1} · Firewood {:.1} · Logs {:.1}",
+        food, fw, logs
+    ));
+
+    let rates = production_rates(s, season);
+    let mut prod: Vec<String> = rates
+        .iter()
+        .map(|(r, v)| format!("{r} +{v:.1}/d"))
+        .collect();
+    prod.sort();
+    lines.push(if prod.is_empty() {
+        "Producing — nothing this season (crops rest in Winter/Spring)".to_string()
+    } else {
+        format!("Producing — {}", prod.join(", "))
+    });
+
+    let nd = needs(s, season);
+    let mut nlines: Vec<String> = nd
+        .iter()
+        .map(|(r, v)| {
+            let extra = if r == "Firewood" { " (Winter)" } else { "" };
+            format!("{r} {v:.1}/d{extra}")
+        })
+        .collect();
+    nlines.sort();
+    lines.push(format!("Needs — {}", nlines.join(", ")));
+
+    lines.push(status_line(s));
+    lines.join("\n")
+}
+
+fn update_hud(
+    mut hud: Query<&mut Text, With<HudText>>,
+    clock: Res<SimClock>,
+    settlement_q: Query<&Settlement>,
+    factions: Res<settlement::Factions>,
+) {
+    for mut text in &mut hud {
+        if let Some(s) = settlement_q.iter().next() {
+            let faction = factions
+                .names
+                .get(s.faction_idx)
+                .cloned()
+                .unwrap_or_default();
+            text.0 = hud_text(&clock, s, &faction);
+        }
+    }
 }
