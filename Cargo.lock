@@ -5416,7 +5416,7 @@ dependencies = [
 
 [[package]]
 name = "shapes_of_war"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "bevy",
 ]
