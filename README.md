@@ -36,4 +36,4 @@ cargo run -p shapes_of_war --example debug_site  # year-by-year state, fixed see
 See [`RUST_PORT_PLAN.md`](RUST_PORT_PLAN.md) for the port strategy, the
 continuous-time execution model, and the milestone roadmap (M0 walking
 skeleton, M1 worldgen, M2 time + settlement, M3 economy, M4 trade + build —
-done).
+done; M5 war in progress (M5a unit layer landed, headless).
