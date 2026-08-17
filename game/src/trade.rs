@@ -672,7 +672,6 @@ mod tests {
         // A genuinely landlocked pair (neither capital can reach open
         // water) is the Python's own "these realms are simply not
         // connected" outcome — rare, not the rule.
-        let mut land = 0;
         let mut sea = 0;
         let mut none = 0;
         for seed in [2024u64, 777, 4242, 555, 999, 31337] {
@@ -683,7 +682,6 @@ mod tests {
                 assert!(path.len() >= 2);
                 assert_eq!(path.first(), Some(&a.pos));
                 assert_eq!(path.last(), Some(&b.pos));
-                land += 1;
                 continue;
             }
             if let Some(path) = sea_path(&map, a.pos, b.pos) {
@@ -792,7 +790,7 @@ mod tests {
         let mut treasury = Treasury::new(2);
         run_trade_ai(&mut state, &mut towns, Season::Spring);
         assert_eq!(state.caravans.len(), 1);
-        let (qty, price) = (state.caravans[0].quantity, state.caravans[0].unit_price);
+        let qty = state.caravans[0].quantity;
         assert!(qty >= MIN_TRADE_QUANTITY);
         // Travel the outbound leg.
         let days = state.caravans[0].turns_total;

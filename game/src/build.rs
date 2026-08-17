@@ -455,7 +455,6 @@ pub(crate) fn build_system(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use crate::worldgen;
 
     fn two_towns() -> (Vec<Settlement>, Treasury, BuildState) {
@@ -480,7 +479,7 @@ mod tests {
             for tier in 1..=b.max_tier() {
                 assert!(b.turns(tier).is_finite() && b.turns(tier) > 0.0, "{} t{tier} turns", b.name());
                 assert!(!b.cost(tier).is_empty(), "{} t{tier} cost empty", b.name());
-                assert!(b.cost(tier).iter().all(|(r, a)| *a > 0.0));
+                assert!(b.cost(tier).iter().all(|(_, a)| *a > 0.0));
             }
         }
     }
