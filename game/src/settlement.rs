@@ -1,5 +1,5 @@
-//! `settlement` — one faction, one continuously-producing settlement (port
-//! milestone M2, running the M3 economy).
+//! `settlement` — the per-settlement population/economy loop (port milestone
+//! M2, running the M3 economy and the M4 world).
 //!
 //! Everything here ports a named piece of the Python game's economy
 //! (`app/world/resources.py` + `app/world/worldgen.py`), rebuilt as
@@ -35,12 +35,15 @@
 //! (Cotton/Fodder are not food), Timber pools Planks + Logs, and Luxury
 //! pools every Luxury Good.
 //!
-//! Remaining deferrals, each a conscious M4+ choice:
-//! - one faction, one settlement (a town), no regions/kingdoms yet — so the
-//!   population-migration term is zero and no Coal exists for firewood
-//!   substitution (the hook is marked in `consume`);
+//! Remaining deferrals, each a conscious M5+ choice:
+//! - no regions/kingdoms yet — so the population-migration term is zero and
+//!   no Coal exists for firewood substitution (the hook is marked in
+//!   `consume`);
 //! - the food pool lacks the Fish / Subterranean members and the extra Food
-//!   Products (Cheese, Meat, …) whose raw inputs no M3 system produces.
+//!   Products (Cheese, Meat, …) whose raw inputs no M4 system produces.
+//! - M4 adds the second faction and its own capital for trade, but there are
+//!   still no villages, no sea routes, and no diplomacy beyond "both realms
+//!   are in contact and neutral".
 
 use std::collections::{HashMap, VecDeque};
 
@@ -96,6 +99,13 @@ pub use crate::economy::BASE_VALUE_BY_TIER;
 pub const BASE_CROP_YIELD_PER_CELL: f64 = 10.0;
 pub const BASE_FORESTRY_YIELD_PER_CELL: f64 = 0.6; // Logs etc.
 pub const FIREWOOD_YIELD_PER_CELL: f64 = 0.3; // survival fuel, kept higher
+/// Base per-cell Mining yield (`BASE_MINING_YIELD_PER_CELL`): Stone/Iron are
+/// durable, sink-less pile-ups, so the rate is cut hard like structural wood.
+pub const BASE_MINING_YIELD_PER_CELL: f64 = 0.2;
+/// Gold Ore's per-cell override (`GOLD_ORE_YIELD_PER_CELL`) — kept high
+/// because it is the only input to the game's only source of coin: a Mint
+/// strikes Gold from it, so its yield must survive the rarity share.
+pub const GOLD_ORE_YIELD_PER_CELL: f64 = 3.0;
 pub const RARITY_ABUNDANCE: [f64; 3] = [1.0, 0.5, 0.2]; // common, uncommon, rare
 
 // --- ported constants: geography --------------------------------------------
@@ -192,9 +202,9 @@ fn biome_preference(b: u8) -> f64 {
 pub enum Rarity {
     Common,
     Uncommon,
-    /// No M2 resource is rare (that's the mining seams of M3); the value is
-    /// ported so RARITY_ABUNDANCE stays the complete Python table.
-    #[allow(dead_code)]
+    /// M4's Gold Ore (the Mint's input) is the one rare raw a town can
+    /// produce — same as Python: "scarcer (rare, same as Gems) so a Mint's
+    /// output stays meaningfully bottlenecked by geography".
     Rare,
 }
 
@@ -242,7 +252,7 @@ pub const CROPS: [Crop; 13] = [
 pub use crate::economy::FOOD_SOURCES;
 
 /// A Forestry/Mining raw that produces continuously (no growth cycle).
-pub struct Forestry {
+pub struct Industry {
     pub name: &'static str,
     pub biomes: &'static [&'static str],
     pub affinity: [f64; 4],
@@ -251,12 +261,24 @@ pub struct Forestry {
     pub yield_per_cell: f64,
 }
 
-/// RESOURCE_SPAWN for the two Forestry resources M2 produces. Logs uses the
-/// category base; Firewood carries its per-resource override, both from
-/// resources.py (`_raw_yield_per_cell`).
-pub const FORESTRY: [Forestry; 2] = [
-    Forestry { name: "Logs", biomes: &["forest", "taiga", "jungle"], affinity: [1.1, 0.3, 0.9, 1.2], fertility_weight: 0.2, rarity: Rarity::Common, yield_per_cell: BASE_FORESTRY_YIELD_PER_CELL },
-    Forestry { name: "Firewood", biomes: &["forest", "taiga", "jungle"], affinity: [1.0, 0.5, 1.0, 1.0], fertility_weight: 0.1, rarity: Rarity::Common, yield_per_cell: FIREWOOD_YIELD_PER_CELL },
+/// RESOURCE_SPAWN for the raw Forestry/Mining resources M4 produces. Logs
+/// uses the category base and Firewood its per-resource override, both from
+/// resources.py (`_raw_yield_per_cell`). M4 (the build + currency milestone)
+/// adds the three Mining raws the economy needs — Stone (mountain/highland/
+/// tundra) and Iron (mountain/highland) at `BASE_MINING_YIELD_PER_CELL` 0.2
+/// for the storage buildings, and Gold Ore (mountain/highland, rare, yield
+/// 3.0) whose Mint — already in the M3 RECIPES registry — is the game's only
+/// source of coin ("gold only enters via mining", the Python Currency
+/// overhaul). All three have neutral climate (weather doesn't affect what's
+/// in the ground) and zero fertility weight, exactly `RESOURCE_SPAWN`.
+/// Shares stay the M2 convention: only the *ported* members of the category
+/// compete, so the forest-only Logs/Firewood split is unchanged.
+pub const INDUSTRY: [Industry; 5] = [
+    Industry { name: "Logs", biomes: &["forest", "taiga", "jungle"], affinity: [1.1, 0.3, 0.9, 1.2], fertility_weight: 0.2, rarity: Rarity::Common, yield_per_cell: BASE_FORESTRY_YIELD_PER_CELL },
+    Industry { name: "Firewood", biomes: &["forest", "taiga", "jungle"], affinity: [1.0, 0.5, 1.0, 1.0], fertility_weight: 0.1, rarity: Rarity::Common, yield_per_cell: FIREWOOD_YIELD_PER_CELL },
+    Industry { name: "Stone", biomes: &["mountain", "highland", "tundra"], affinity: [1.0, 1.0, 1.0, 1.0], fertility_weight: 0.0, rarity: Rarity::Common, yield_per_cell: BASE_MINING_YIELD_PER_CELL },
+    Industry { name: "Iron", biomes: &["mountain", "highland"], affinity: [1.0, 1.0, 1.0, 1.0], fertility_weight: 0.0, rarity: Rarity::Common, yield_per_cell: BASE_MINING_YIELD_PER_CELL },
+    Industry { name: "Gold Ore", biomes: &["mountain", "highland"], affinity: [1.0, 1.0, 1.0, 1.0], fertility_weight: 0.0, rarity: Rarity::Rare, yield_per_cell: GOLD_ORE_YIELD_PER_CELL },
 ];
 
 /// Timber upkeep is drawn from any structural-wood pool (Python
@@ -282,11 +304,11 @@ fn land_share(biome: &str, resource: &Crop) -> f64 {
     resource.rarity.abundance() / total
 }
 
-fn forestry_share(biome: &str, resource: &Forestry) -> f64 {
+fn industry_share(biome: &str, resource: &Industry) -> f64 {
     if !resource.biomes.contains(&biome) {
         return 0.0;
     }
-    let total: f64 = FORESTRY
+    let total: f64 = INDUSTRY
         .iter()
         .filter(|f| f.biomes.contains(&biome))
         .map(|f| f.rarity.abundance())
@@ -299,15 +321,15 @@ fn forestry_share(biome: &str, resource: &Forestry) -> f64 {
 
 // --- the settlement ----------------------------------------------------------
 
-/// A single population-owning node (the town), shaped exactly like the
+/// A single population-owning node (a town), shaped exactly like the
 /// Python `Settlement`/`Village` pair. Population is a continuous f64 (no
 /// integer "head" rounding — a continuous-time port has no day boundary to
-/// round at), displayed rounded in the HUD.
+/// round at), displayed rounded in the HUD. M4 fields: `tax_income` (the
+/// currency milestone) and `storage` (the build milestone) — see `build`
+/// and `trade`.
 #[derive(Component)]
 pub struct Settlement {
-    /// Settlement id — the key trade/route logic (M4+) will address nodes
-    /// by; not yet read by anything in M2.
-    #[allow(dead_code)]
+    /// Settlement id — the key trade/route logic (M4) addresses nodes by.
     pub id: u32,
     pub name: String,
     pub pos: (i32, i32),
@@ -333,6 +355,11 @@ pub struct Settlement {
     pub biome_counts: HashMap<String, i32>,
     pub climate: Climate,
     pub fertility_frac: f64,
+    /// Gold the settlement pays into its faction's treasury each day
+    /// (`SETTLEMENT_TAX_INCOME["town"]`, rolled once at placement).
+    pub tax_income: f64,
+    /// Built storage tiers (granary/warehouse/vault) — M4's build milestone.
+    pub storage: crate::economy::StorageTiers,
 }
 
 /// Port of `worldgen._roll_population` for a town (continuous).
@@ -348,19 +375,47 @@ const TOWN_NAMES: [&str; 10] = [
     "Stonebridge", "Fernwood", "Oakhurst", "Dalemere",
 ];
 
+/// Names for the second (AI) faction's capital — the neighbour M4's trade
+/// milestone exists to reach. Picked deterministically from the seed.
+const SECOND_CAPITAL_NAMES: [&str; 6] = [
+    "The Stone March", "The Amber Coast", "The White Wold",
+    "The Salt Fens", "The Thorn Lands", "The Iron Reach",
+];
+
 impl Settlement {
-    /// Roll + place one town on `map`, deterministically from `seed`.
+    /// Roll + place the player's town (faction 0, id 0) on `map`,
+    /// deterministically from `seed`.
     pub fn spawn(map: &WorldMap, seed: u64) -> Settlement {
-        let mut rng = Rng::new(seed ^ 0x5E71_7E5E);
-        let (x, y) = find_start_site(map);
+        Self::spawn_at(map, seed, 0, 0, None)
+    }
+
+    /// Roll + place one town for `faction_idx` with `id`. `far_from`, when
+    /// given, forces the site at least ~45% of the map's width away (wrapped),
+    /// so the two capitals sit on genuinely different continents — the
+    /// distance trade exists to bridge. Deterministic in `seed` + `faction`.
+    pub fn spawn_at(
+        map: &WorldMap,
+        seed: u64,
+        faction_idx: usize,
+        id: u32,
+        far_from: Option<(i32, i32)>,
+    ) -> Settlement {
+        let mut rng = Rng::new(seed ^ 0x5E71_7E5E ^ (faction_idx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let (x, y) = find_start_site(map, far_from);
         let water_dist = water_distance(map);
         let (biome_counts, climate, fertility_frac) = sample_catchment(map, &water_dist, x, y);
         let (population, adults, children, max_population) = roll_population(&mut rng);
+        // SETTLEMENT_TAX_INCOME["town"] = (2, 4), rolled once at placement.
+        let tax_income = rng.range_f64(2.0, 4.0);
         Settlement {
-            id: 0,
-            name: TOWN_NAMES[rng.below(TOWN_NAMES.len())].to_string(),
+            id,
+            name: if faction_idx == 0 {
+                TOWN_NAMES[rng.below(TOWN_NAMES.len())].to_string()
+            } else {
+                SECOND_CAPITAL_NAMES[rng.below(SECOND_CAPITAL_NAMES.len())].to_string()
+            },
             pos: (x, y),
-            faction_idx: 0,
+            faction_idx,
             population,
             adults,
             children,
@@ -374,11 +429,15 @@ impl Settlement {
             biome_counts,
             climate,
             fertility_frac,
+            tax_income,
+            storage: crate::economy::StorageTiers::default(),
         }
     }
 }
 
-/// The one faction (Python world.factions[0]).
+/// The factions of the world (Python `world.factions`). M4 has two: the
+/// player's realm and the AI neighbour its trade exists to reach. `main`
+/// inserts the real names after spawning; the default is the pre-M4 world.
 #[derive(Resource)]
 pub struct Factions {
     pub names: Vec<String>,
@@ -388,6 +447,74 @@ impl Default for Factions {
     fn default() -> Self {
         Factions {
             names: vec!["The Reach".to_string()],
+        }
+    }
+}
+
+/// Faction display names live in `main`; here only the spawn machinery.
+
+/// Port of `seed_initial_stockpiles` (resources.py, called once at worldgen):
+/// gives every settlement a starting reserve instead of an empty granary —
+/// `_STARTING_STOCKPILE_TURNS` (6) days of its own production for every raw
+/// it can actually grow/mine (crops counted in their own harvest season,
+/// industry year-round), and its share of `STARTING_GOLD_PER_FACTION` split
+/// evenly across the faction's settlements (trade liquidity — the treasury
+/// is seeded separately by `build`). Seeded stock is clamped so no pool
+/// starts over capacity (Python's `_clamp_to_storage` spirit).
+///
+/// Without this a fresh town would have nothing to eat until its first
+/// harvest — the exact starvation-in-the-opening-stretch bug the Python
+/// seed exists to fix.
+pub fn seed_initial_stockpiles(settlements: &mut [Settlement]) {
+    let n = settlements.len().max(1);
+    let share = crate::economy::STARTING_GOLD_PER_FACTION / n as f64;
+    for s in settlements.iter_mut() {
+        // 6 days of production per raw: crops fire only in their own harvest
+        // season, so the max over the four seasons is the daily rate for
+        // both crops and year-round industry.
+        let mut seed: HashMap<String, f64> = HashMap::new();
+        for season in [Season::Spring, Season::Summer, Season::Autumn, Season::Winter] {
+            for (r, rate) in production_rates(s, season) {
+                let e = seed.entry(r).or_insert(0.0);
+                *e = e.max(rate);
+            }
+        }
+        for (r, rate) in seed {
+            if rate > 0.0 {
+                *s.resources.entry(r).or_insert(0.0) += rate * _STARTING_STOCKPILE_TURNS;
+            }
+        }
+        *s.resources.entry("Gold".to_string()).or_insert(0.0) += share;
+        clamp_to_storage(s);
+    }
+}
+
+/// 6 turns' worth of production seeded at gen time (`_STARTING_STOCKPILE_TURNS`).
+const _STARTING_STOCKPILE_TURNS: f64 = 6.0;
+
+/// The seeded reserve mustn't itself exceed the pools (`_clamp_to_storage`):
+/// a pool packed past capacity scales its members down together (proportional
+/// — deterministic and preserves the reserve's composition).
+pub fn clamp_to_storage(s: &mut Settlement) {
+    for p in [
+        crate::economy::StorageClass::Household,
+        crate::economy::StorageClass::Durable,
+        crate::economy::StorageClass::Other,
+        crate::economy::StorageClass::Feed,
+    ] {
+        let cap = crate::economy::pool_capacity_tiers(p, &s.storage);
+        let used = crate::economy::pool_stock(&s.resources, p);
+        if used <= cap {
+            continue;
+        }
+        let scale = cap / used;
+        // Fixed registry order (determinism — never HashMap order).
+        for r in crate::economy::RESOURCES {
+            if r.pool == p {
+                if let Some(v) = s.resources.get_mut(r.name) {
+                    *v *= scale;
+                }
+            }
         }
     }
 }
@@ -487,7 +614,12 @@ fn sample_catchment(
 /// regional markets arrived (both M3/M4 here), so the M2 heuristic refuses
 /// to found the demo town on a site that cannot keep itself warm — it
 /// prefers farmland with meaningful forest cover in the same catchment.
-pub fn find_start_site(map: &WorldMap) -> (i32, i32) {
+///
+/// `far_from` (M4): when placing the second capital, require the site at
+/// least ~45% of the map's width away (wrapped in x) — the two realms must
+/// sit on genuinely different landmasses for trade to mean anything. Falls
+/// back to the plain best site if no far site is good enough.
+pub fn find_start_site(map: &WorldMap, far_from: Option<(i32, i32)>) -> (i32, i32) {
     let water_dist = water_distance(map);
     // Forest share of each cell's own catchment — a radius-4 box blur of a
     // forest mask, the same window as VILLAGE_CATCHMENT_RADIUS.
@@ -500,7 +632,31 @@ pub fn find_start_site(map: &WorldMap) -> (i32, i32) {
         };
     }
     let forest_share = fmask.blur(VILLAGE_CATCHMENT_RADIUS, 1);
+    // M4 (build milestone): a stone/iron term, blurred the same way — the
+    // direction of Python's real `startsites.py evaluate_site`, which scores
+    // mining potential. Without it the farmland-maximising heuristic sits a
+    // town in pure plains whose granary/warehouse/vault (all Stone/Iron-
+    // lined costs) can never be afforded; with a modest term the site lands
+    // near workable highland when the map offers any.
+    let mut smask = Grid::new(map.w, map.h, 0.0);
+    for i in 0..smask.v.len() {
+        smask.v[i] = if python_biome(map.biome[i]) == Some("highland")
+            || python_biome(map.biome[i]) == Some("mountain")
+        {
+            1.0
+        } else {
+            0.0
+        };
+    }
+    let stone_share = smask.blur(VILLAGE_CATCHMENT_RADIUS, 1);
+    let min_far = map.w as f64 * 0.45;
+    // Even when no site is ≥ 45% of the width away (a small, land-poor
+    // map), the second capital must never land on the first's cell — hold
+    // the best site with at least a small separation as the fallback.
+    let min_sep = 16.0;
     let mut best: Option<(f64, i32, i32)> = None;
+    let mut best_far: Option<(f64, i32, i32)> = None;
+    let mut best_sep: Option<(f64, i32, i32)> = None;
     for y in (0..map.h).step_by(2) {
         for x in (0..map.w).step_by(2) {
             let i = (y * map.w + x) as usize;
@@ -514,13 +670,23 @@ pub fn find_start_site(map: &WorldMap) -> (i32, i32) {
             let fert = fertility_at(map, &water_dist, x, y);
             let water = (-water_dist[i] / WATER_FALLOFF).exp();
             let fuel = 2.0 * (forest_share.v[i] / 0.30).min(1.0);
-            let score = 2.0 * fert + 0.5 * water + pref + fuel;
+            let stone = 1.0 * (stone_share.v[i] / 0.25).min(1.0);
+            let score = 2.0 * fert + 0.5 * water + pref + fuel + stone;
             if best.map_or(true, |(s, _, _)| score > s) {
                 best = Some((score, x, y));
             }
+            if let Some((fx, _fy)) = far_from {
+                let dx = (x - fx).abs().min(map.w - (x - fx).abs());
+                if dx as f64 >= min_far && best_far.map_or(true, |(s, _, _)| score > s) {
+                    best_far = Some((score, x, y));
+                }
+                if dx as f64 >= min_sep && best_sep.map_or(true, |(s, _, _)| score > s) {
+                    best_sep = Some((score, x, y));
+                }
+            }
         }
     }
-    match best {
+    match best_far.or(best_sep).or(best) {
         Some((_, x, y)) => (x, y),
         None => (map.w / 2, map.h / 2),
     }
@@ -568,10 +734,10 @@ pub fn production_rates(s: &Settlement, season: Season) -> Vec<(String, f64)> {
             out.insert(crop.name.to_string(), amount);
         }
     }
-    for f in FORESTRY.iter() {
+    for f in INDUSTRY.iter() {
         let mut amount = 0.0;
         for (biome, cells) in biomes.iter().copied() {
-            let share = forestry_share(biome, f);
+            let share = industry_share(biome, f);
             if share <= 0.0 {
                 continue;
             }
@@ -798,7 +964,7 @@ pub fn sim_tick(s: &mut Settlement, clock: &SimClock, dt: f64) {
         let thr = if res == "Firewood" {
             1.0
         } else {
-            crate::economy::storage_throttle(&s.resources, crate::economy::pool(&res))
+            crate::economy::storage_throttle(&s.resources, crate::economy::pool(&res), &s.storage)
         };
         *s.resources.entry(res).or_insert(0.0) += rate * dt * thr;
     }
@@ -810,8 +976,8 @@ pub fn sim_tick(s: &mut Settlement, clock: &SimClock, dt: f64) {
 
     // 3. spoil + overflow — every resource decays at its registry
     //    spoil_rate, and a pool packed past capacity decays the overage on
-    //    top of that (M3).
-    crate::economy::spoil_and_overflow(&mut s.resources, dt);
+    //    top of that (M3; the capacity now includes built storage, M4).
+    crate::economy::spoil_and_overflow(&mut s.resources, dt, &s.storage);
 
     // 4. consume — needs × dt from storage, grace counters in continuous
     //    days.
@@ -929,7 +1095,10 @@ impl Plugin for SettlementPlugin {
     }
 }
 
-fn sim_system(mut q: Query<&mut Settlement>, clock: Res<SimClock>, time: Res<Time<Fixed>>) {
+/// The per-entity settlement economy tick (produce/convert/spoil/consume/
+/// grow/prosper). `pub(crate)` so M4's world-level plugins (`trade`,
+/// `build`) can declare they run after it.
+pub(crate) fn sim_system(mut q: Query<&mut Settlement>, clock: Res<SimClock>, time: Res<Time<Fixed>>) {
     let dt = time.delta_secs_f64();
     for mut s in &mut q {
         sim_tick(&mut s, &clock, dt);
@@ -1075,4 +1244,59 @@ mod tests {
         };
         assert_eq!(fp(&a), fp(&b), "same seed must produce identical state");
     }
+
+    #[test]
+    fn seed_initial_stockpiles_gives_gold_larder_without_overflow() {
+        let map = worldgen::generate(256, 160, 2024);
+        let mut towns = vec![Settlement::spawn(&map, 2024)];
+        towns.push(Settlement::spawn_at(&map, 2024, 1, 1, Some(towns[0].pos)));
+        assert!(towns.iter().all(|s| s.resources.is_empty()), "fresh towns start empty");
+        seed_initial_stockpiles(&mut towns);
+        for s in &towns {
+            // Each of the two towns holds half of STARTING_GOLD_PER_FACTION.
+            let gold = s.resources.get("Gold").copied().unwrap_or(0.0);
+            assert!((gold - crate::economy::STARTING_GOLD_PER_FACTION / 2.0).abs() < 1e-9);
+            // The larder has food (the fresh-town starvation the seed exists
+            // to prevent) and its own Stone when the catchment mines it.
+            let food: f64 = crate::economy::FOOD_SOURCES
+                .iter()
+                .map(|r| s.resources.get(*r).copied().unwrap_or(0.0))
+                .sum();
+            assert!(food > 0.0, "{} must seed a food larder", s.name);
+            // Seeded stock never starts a pool over capacity.
+            for p in [
+                crate::economy::StorageClass::Household,
+                crate::economy::StorageClass::Durable,
+                crate::economy::StorageClass::Other,
+                crate::economy::StorageClass::Feed,
+            ] {
+                let used = crate::economy::pool_stock(&s.resources, p);
+                let cap = crate::economy::pool_capacity_tiers(p, &s.storage);
+                assert!(
+                    used <= cap + 1e-6,
+                    "{} {} pool seeded {:.0} over cap {:.0}",
+                    s.name,
+                    format!("{p:?}"),
+                    used,
+                    cap
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn second_capital_sits_far_from_the_first() {
+        let map = worldgen::generate(256, 160, 2024);
+        let a = Settlement::spawn(&map, 2024);
+        let b = Settlement::spawn_at(&map, 2024, 1, 1, Some(a.pos));
+        let dx = (a.pos.0 - b.pos.0).abs().min(map.w - (a.pos.0 - b.pos.0).abs());
+        assert!(
+            dx as f64 >= map.w as f64 * 0.45,
+            "capitals must be far apart: dx {dx} vs {}",
+            map.w as f64 * 0.45
+        );
+    }
 }
+
+
+

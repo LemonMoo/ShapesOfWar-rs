@@ -1,21 +1,26 @@
-//! Shapes of War — Rust core, milestones 2-3: time + settlement, running
-//! the M3 economy.
+//! Shapes of War — Rust core, milestones 2-4: time + settlement + economy,
+//! running the M4 trade and build milestones.
 //!
 //! M1's worldgen is still here and rendered the same way, but the world now
 //! *lives*: a continuous `SimClock` ticks at a fixed 10 Hz, seasons are
-//! derived from it, and one faction's town produces, converts, stores and
-//! consumes continuously on the map (see `time`, `settlement` and `economy`
-//! in the library crate). The HUD shows the clock, the town's demographics/
-//! prosperity/stocks, its storage pools, per-day production/conversion and
-//! needs, and its living conditions; the Regenerate button makes a new world
-//! *and* re-places the town on it.
+//! derived from it, and TWO factions' towns produce, convert, store and
+//! consume continuously on the map (see `time`, `settlement` and `economy`
+//! in the library crate). M4 adds the neighbour realm and makes them trade:
+//! the capitals build a land route toward each other, caravans carry goods
+//! between them for gold, and each realm's kingdom treasury (fed by income
+//! tax and a transaction tax) pays for storage buildings that expand its
+//! pools. The HUD shows the clock, both towns, the treasuries, the route/
+//! caravans and each town's economy; the Regenerate button makes a new world
+//! *and* re-places both towns on it.
 
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
+use shapes_of_war::build;
 use shapes_of_war::economy;
 use shapes_of_war::settlement::{self, needs, production_rates, Settlement};
 use shapes_of_war::time::{self, SimClock};
+use shapes_of_war::trade;
 use shapes_of_war::worldgen;
 
 const MAP_W: i32 = 1024;
@@ -37,9 +42,10 @@ struct MapView {
 #[derive(Component)]
 struct RegenerateButton;
 
-/// Marker on the settlement-marker sprite (positioned from the sim each frame).
+/// Marker on a settlement-marker sprite, keyed to the settlement id it
+/// tracks (positioned from the sim each frame).
 #[derive(Component)]
-struct SettlementMarker;
+struct MarkerFor(u32);
 
 /// Marker on the HUD text (rebuilt each frame).
 #[derive(Component)]
@@ -129,6 +135,8 @@ fn main() {
             DefaultPlugins,
             time::TimePlugin,
             settlement::SettlementPlugin,
+            trade::TradePlugin,
+            build::BuildPlugin,
         ))
         .insert_resource(Terrain(map))
         .insert_resource(MapView {
@@ -255,19 +263,35 @@ fn setup(
         Transform::from_xyz(0.0, 0.0, 0.0),
     ));
 
-    // The town + its marker dot.
-    let s = Settlement::spawn(map, view.seed);
-    log_settlement(&s);
-    commands.spawn(s);
-    commands.spawn((
-        Sprite {
-            image: images.add(build_marker_image()),
-            custom_size: Some(Vec2::splat(14.0)),
-            ..default()
-        },
-        Transform::from_xyz(0.0, 0.0, 1.0),
-        SettlementMarker,
-    ));
+    // Both towns + their marker dots. Faction 1's capital is placed far from
+    // the player's (M4: trade exists to bridge real distance); both start
+    // with their seeded reserve (6 days of production + gold share).
+    let mut towns = vec![Settlement::spawn(map, view.seed)];
+    towns.push(Settlement::spawn_at(map, view.seed, 1, 1, Some(towns[0].pos)));
+    settlement::seed_initial_stockpiles(&mut towns);
+    for s in &towns {
+        log_settlement(s);
+    }
+    commands.insert_resource(settlement::Factions {
+        names: towns.iter().map(|s| s.name.clone()).collect(),
+    });
+    commands.insert_resource(trade::TradeState::new(map, &towns[0], &towns[1]));
+    commands.insert_resource(build::Treasury::new(2));
+    commands.insert_resource(build::BuildState::default());
+    for s in towns {
+        commands.spawn(s);
+    }
+    for id in [0u32, 1] {
+        commands.spawn((
+            Sprite {
+                image: images.add(build_marker_image()),
+                custom_size: Some(Vec2::splat(14.0)),
+                ..default()
+            },
+            Transform::from_xyz(0.0, 0.0, 1.0),
+            MarkerFor(id),
+        ));
+    }
 
     // Regenerate button, top-left.
     commands
@@ -329,6 +353,7 @@ fn regenerate(
     mut view: ResMut<MapView>,
     mut commands: Commands,
     settlement_entity: Query<Entity, With<Settlement>>,
+    marker_entity: Query<Entity, With<MarkerFor>>,
 ) {
     if !interaction.iter().any(|i| matches!(i, Interaction::Pressed)) {
         return;
@@ -341,24 +366,48 @@ fn regenerate(
     let _ = images.insert(view.handle.id(), image);
     terrain.0 = map;
 
-    // The town is re-placed on the new world.
-    for e in &settlement_entity {
+    // Both towns are re-placed on the new world, and the M4 world state
+    // (factions, trade, treasury, builds) is rebuilt for it.
+    for e in settlement_entity.iter().chain(marker_entity.iter()) {
         commands.entity(e).despawn();
     }
-    let s = Settlement::spawn(&terrain.0, view.seed);
-    log_settlement(&s);
-    commands.spawn(s);
+    let mut towns = vec![Settlement::spawn(&terrain.0, view.seed)];
+    towns.push(Settlement::spawn_at(&terrain.0, view.seed, 1, 1, Some(towns[0].pos)));
+    settlement::seed_initial_stockpiles(&mut towns);
+    for s in &towns {
+        log_settlement(s);
+    }
+    commands.insert_resource(settlement::Factions {
+        names: towns.iter().map(|s| s.name.clone()).collect(),
+    });
+    commands.insert_resource(trade::TradeState::new(&terrain.0, &towns[0], &towns[1]));
+    commands.insert_resource(build::Treasury::new(2));
+    commands.insert_resource(build::BuildState::default());
+    for s in towns {
+        commands.spawn(s);
+    }
+    for id in [0u32, 1] {
+        commands.spawn((
+            Sprite {
+                image: images.add(build_marker_image()),
+                custom_size: Some(Vec2::splat(14.0)),
+                ..default()
+            },
+            Transform::from_xyz(0.0, 0.0, 1.0),
+            MarkerFor(id),
+        ));
+    }
 }
 
-/// Keep the marker dot glued to the town's map cell.
+/// Keep each marker dot glued to its town's map cell.
 fn sync_marker(
-    mut marker: Query<&mut Transform, With<SettlementMarker>>,
+    mut markers: Query<(&mut Transform, &MarkerFor)>,
     settlement: Query<&Settlement>,
     terrain: Res<Terrain>,
 ) {
-    for mut t in &mut marker {
-        if let Some(s) = settlement.iter().next() {
-            let map = &terrain.0;
+    let map = &terrain.0;
+    for (mut t, for_id) in &mut markers {
+        if let Some(s) = settlement.iter().find(|s| s.id == for_id.0) {
             t.translation = Vec3::new(
                 s.pos.0 as f32 - map.w as f32 / 2.0,
                 map.h as f32 / 2.0 - s.pos.1 as f32,
@@ -406,7 +455,14 @@ fn status_line(s: &Settlement) -> String {
     bits.join(" · ")
 }
 
-fn hud_text(clock: &SimClock, s: &Settlement, faction: &str) -> String {
+fn hud_text(
+    clock: &SimClock,
+    settlements: &[&Settlement],
+    factions: &settlement::Factions,
+    trade_state: &trade::TradeState,
+    treasury: &build::Treasury,
+    build_state: &build::BuildState,
+) -> String {
     let season = clock.season();
     let mut lines: Vec<String> = Vec::new();
 
@@ -423,75 +479,130 @@ fn hud_text(clock: &SimClock, s: &Settlement, faction: &str) -> String {
         day_night
     ));
 
-    lines.push(format!(
-        "{} (town) — {}   Pop {:.0} (adults {:.0}, children {:.0}) / max {:.0}",
-        s.name, faction, s.population, s.adults, s.children, s.max_population
-    ));
-    lines.push(format!("Prosperity {:.1}", s.prosperity));
+    // Both realms, each with its own stocks + storage (M4 pool caps now
+    // include the built tiers).
+    for s in settlements {
+        let faction = factions.names.get(s.faction_idx).cloned().unwrap_or_default();
+        lines.push(format!(
+            "{} — {}   Pop {:.0} (adults {:.0}, children {:.0}) / max {:.0}   Prosperity {:.1}",
+            s.name, faction, s.population, s.adults, s.children, s.max_population, s.prosperity
+        ));
+        let food = food_stock(s);
+        let fw = s.resources.get("Firewood").copied().unwrap_or(0.0);
+        let logs = s.resources.get("Logs").copied().unwrap_or(0.0);
+        let stone = s.resources.get("Stone").copied().unwrap_or(0.0);
+        let iron = s.resources.get("Iron").copied().unwrap_or(0.0);
+        let gold = s.resources.get("Gold").copied().unwrap_or(0.0);
+        lines.push(format!(
+            "  Stock — Food {:.0} · Firewood {:.0} · Logs {:.0} · Stone {:.0} · Iron {:.0} · Gold {:.0}",
+            food, fw, logs, stone, iron, gold
+        ));
+        let pools = [
+            ("granary", economy::StorageClass::Household),
+            ("warehouse", economy::StorageClass::Durable),
+            ("vault", economy::StorageClass::Other),
+            ("barn", economy::StorageClass::Feed),
+        ];
+        let mut storage_bits: Vec<String> = pools
+            .iter()
+            .map(|(name, p)| {
+                let used = economy::pool_stock(&s.resources, *p);
+                let cap = economy::pool_capacity_tiers(*p, &s.storage);
+                format!("{name} {used:.0}/{cap:.0}")
+            })
+            .collect();
+        storage_bits.sort();
+        lines.push(format!("  Storage — {}", storage_bits.join(" · ")));
+    }
 
-    let food = food_stock(s);
-    let fw = s.resources.get("Firewood").copied().unwrap_or(0.0);
-    let logs = s.resources.get("Logs").copied().unwrap_or(0.0);
-    lines.push(format!(
-        "Stock — Food {:.1} · Firewood {:.1} · Logs {:.1}",
-        food, fw, logs
-    ));
-
-    // M3 storage: bulk-weighted occupancy of each typed pool vs its town cap.
-    let pools = [
-        ("granary", economy::StorageClass::Household),
-        ("warehouse", economy::StorageClass::Durable),
-        ("vault", economy::StorageClass::Other),
-        ("barn", economy::StorageClass::Feed),
-    ];
-    let mut storage_bits: Vec<String> = pools
+    // The kingdom treasuries (M4 currency): taxes fill them, they fund the
+    // Gold line of construction.
+    let tbits: Vec<String> = treasury
+        .gold
         .iter()
-        .map(|(name, p)| {
-            let used = economy::pool_stock(&s.resources, *p);
-            let cap = economy::pool_capacity(*p);
-            format!("{name} {used:.0}/{cap:.0}")
-        })
+        .enumerate()
+        .map(|(i, g)| format!("{} {:.0}", factions.names.get(i).cloned().unwrap_or_default(), g))
         .collect();
-    storage_bits.sort();
-    lines.push(format!("Storage — {}", storage_bits.join(" · ")));
+    lines.push(format!("Treasury — {}", tbits.join(" · ")));
 
-    // M3 conversion: what the settlement's recipes would convert today.
-    let conv = economy::conversion_rates(&s.resources, clock.seconds);
-    let mut cbits: Vec<String> = conv
-        .iter()
-        .map(|(out, per_day)| format!("{out} +{per_day:.1}/d"))
-        .collect();
-    cbits.sort();
-    lines.push(if cbits.is_empty() {
-        "Converting — nothing (no recipe inputs in stock)".to_string()
+    // M4 trade: the route (building or open) and the caravans on it.
+    let route_bit = if !trade_state.route_projects.is_empty() {
+        let p = &trade_state.route_projects[0];
+        let pct = (100.0 * p.progress / p.total_cells()).min(100.0);
+        format!("route {pct:.0}% ({:.0}/{} cells)", p.progress, p.total_cells() as i64)
+    } else if !trade_state.routes.is_empty() {
+        "route open".to_string()
     } else {
-        format!("Converting — {}", cbits.join(", "))
-    });
+        "no route".to_string()
+    };
+    lines.push(format!(
+        "Trade — {} · {} caravan(s) en route",
+        route_bit,
+        trade_state.caravans.len()
+    ));
 
-    let rates = production_rates(s, season);
-    let mut prod: Vec<String> = rates
-        .iter()
-        .map(|(r, v)| format!("{r} +{v:.1}/d"))
-        .collect();
-    prod.sort();
-    lines.push(if prod.is_empty() {
-        "Producing — nothing this season (crops rest in Winter/Spring)".to_string()
-    } else {
-        format!("Producing — {}", prod.join(", "))
-    });
+    // M4 build: what is under construction.
+    if !build_state.projects.is_empty() {
+        let bits: Vec<String> = build_state
+            .projects
+            .iter()
+            .map(|p| {
+                let name = settlements
+                    .iter()
+                    .find(|s| s.id == p.settlement_id)
+                    .map(|s| s.name.as_str())
+                    .unwrap_or("?");
+                format!(
+                    "{}: {} tier {} ({:.0}%)",
+                    name,
+                    p.building.name(),
+                    p.to_tier,
+                    100.0 * p.progress / p.building.turns(p.to_tier)
+                )
+            })
+            .collect();
+        lines.push(format!("Building — {}", bits.join(" · ")));
+    }
 
-    let nd = needs(s, season);
-    let mut nlines: Vec<String> = nd
-        .iter()
-        .map(|(r, v)| {
-            let extra = if r == "Firewood" { " (Winter)" } else { "" };
-            format!("{r} {v:.1}/d{extra}")
-        })
-        .collect();
-    nlines.sort();
-    lines.push(format!("Needs — {}", nlines.join(", ")));
+    // The player's town economy details (producing/converting/needs/status).
+    if let Some(s) = settlements.first() {
+        let conv = economy::conversion_rates(&s.resources, clock.seconds);
+        let mut cbits: Vec<String> = conv
+            .iter()
+            .map(|(out, per_day)| format!("{out} +{per_day:.1}/d"))
+            .collect();
+        cbits.sort();
+        lines.push(if cbits.is_empty() {
+            "Converting — nothing (no recipe inputs in stock)".to_string()
+        } else {
+            format!("Converting — {}", cbits.join(", "))
+        });
 
-    lines.push(status_line(s));
+        let rates = production_rates(s, season);
+        let mut prod: Vec<String> = rates
+            .iter()
+            .map(|(r, v)| format!("{r} +{v:.1}/d"))
+            .collect();
+        prod.sort();
+        lines.push(if prod.is_empty() {
+            "Producing — nothing this season (crops rest in Winter/Spring)".to_string()
+        } else {
+            format!("Producing — {}", prod.join(", "))
+        });
+
+        let nd = needs(s, season);
+        let mut nlines: Vec<String> = nd
+            .iter()
+            .map(|(r, v)| {
+                let extra = if r == "Firewood" { " (Winter)" } else { "" };
+                format!("{r} {v:.1}/d{extra}")
+            })
+            .collect();
+        nlines.sort();
+        lines.push(format!("Needs — {}", nlines.join(", ")));
+
+        lines.push(status_line(s));
+    }
     lines.join("\n")
 }
 
@@ -500,15 +611,13 @@ fn update_hud(
     clock: Res<SimClock>,
     settlement_q: Query<&Settlement>,
     factions: Res<settlement::Factions>,
+    trade_state: Res<trade::TradeState>,
+    treasury: Res<build::Treasury>,
+    build_state: Res<build::BuildState>,
 ) {
     for mut text in &mut hud {
-        if let Some(s) = settlement_q.iter().next() {
-            let faction = factions
-                .names
-                .get(s.faction_idx)
-                .cloned()
-                .unwrap_or_default();
-            text.0 = hud_text(&clock, s, &faction);
-        }
+        let mut settlements: Vec<&Settlement> = settlement_q.iter().collect();
+        settlements.sort_by(|a, b| a.id.cmp(&b.id));
+        text.0 = hud_text(&clock, &settlements, &factions, &trade_state, &treasury, &build_state);
     }
 }

@@ -224,6 +224,11 @@ pub fn resource_value(name: &str, amount: f64) -> f64 {
 /// Python `BASE_VALUE_BY_TIER` — gold/unit before scarcity, tier-indexed.
 pub const BASE_VALUE_BY_TIER: [f64; 6] = [0.0, 2.0, 3.0, 5.0, 9.0, 15.0];
 
+/// A faction's total starting Gold reserve, split across its settlements at
+/// worldgen (`STARTING_GOLD_PER_FACTION` — trade liquidity; the kingdom
+/// treasury is seeded separately in `build`).
+pub const STARTING_GOLD_PER_FACTION: f64 = 4000.0;
+
 /// Convenience accessors — every unknown-name case defaults exactly like the
 /// Python dict `.get(name, default)` calls they replace.
 pub fn spoil_rate(name: &str) -> f64 {
@@ -409,15 +414,62 @@ pub const STORAGE_THROTTLE_START: f64 = 0.85;
 pub const STORAGE_THROTTLE_FLOOR: f64 = 0.15;
 
 /// The four pools' base capacities for a Town (`STORAGE_POOL_BASE["town"]`):
-/// household 840, durable 750, other 150, feed 200. No storage buildings
-/// exist in M3 (that is the M4 build milestone), so these are flat.
+/// household 840, durable 750, other 150, feed 200.
+const TOWN_POOL_BASE: [f64; 4] = [840.0, 750.0, 150.0, 200.0];
+
+/// A node's built storage (`{building}_tier` in the Python game): how many
+/// tiers of each pool-building it has completed. Tier 0 = not built. The
+/// M4 build milestone makes `pool_capacity` a function of these instead of
+/// flat base values.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct StorageTiers {
+    pub granary: u8,
+    pub warehouse: u8,
+    pub vault: u8,
+}
+
+/// Extra pool capacity per completed building tier (`STORAGE_TIER_BONUS`,
+/// indexed by tier — the town rows; villages scale differently and arrive
+/// with the village ladder).
+pub const STORAGE_TIER_BONUS: [&[f64]; 3] = [
+    &[0.0, 1200.0, 2650.0, 4800.0], // granary  -> Household pool
+    &[0.0, 1200.0, 2700.0, 4900.0], // warehouse -> Durable pool
+    &[0.0, 400.0, 1000.0],          // vault    -> Other (vault) pool
+];
+
+/// Base capacity of one pool with no storage buildings
+/// (`STORAGE_POOL_BASE["town"]`, flat in M3).
 pub fn pool_capacity(pool: StorageClass) -> f64 {
-    match pool {
-        StorageClass::Household => 840.0,
-        StorageClass::Durable => 750.0,
-        StorageClass::Other => 150.0,
-        StorageClass::Feed => 200.0,
-    }
+    TOWN_POOL_BASE[pool as usize]
+}
+
+/// Capacity of one pool including the node's built storage (M4): the town
+/// base plus the tier bonus of the pool's building (granary → Household,
+/// warehouse → Durable, vault → Other; the Barn stays a village building, so
+/// Feed keeps its base).
+pub fn pool_capacity_tiers(pool: StorageClass, tiers: &StorageTiers) -> f64 {
+    let base = TOWN_POOL_BASE[pool as usize];
+    let bonus = match pool {
+        StorageClass::Household => tier_bonus(STORAGE_TIER_BONUS[0], tiers.granary),
+        StorageClass::Durable => tier_bonus(STORAGE_TIER_BONUS[1], tiers.warehouse),
+        StorageClass::Other => tier_bonus(STORAGE_TIER_BONUS[2], tiers.vault),
+        StorageClass::Feed => 0.0,
+    };
+    base + bonus
+}
+
+fn tier_bonus(table: &[f64], tier: u8) -> f64 {
+    table.get(tier as usize).copied().unwrap_or(0.0)
+}
+
+/// Total storage space of a node — the sum of its four pools
+/// (`settlement_storage_capacity`, the `cap` the trade pricing formulas
+/// divide by).
+pub fn settlement_storage_capacity(tiers: &StorageTiers) -> f64 {
+    [StorageClass::Household, StorageClass::Durable, StorageClass::Other, StorageClass::Feed]
+        .iter()
+        .map(|p| pool_capacity_tiers(*p, tiers))
+        .sum()
 }
 
 /// Space occupied in one pool — units weighted by bulk (Phase 2 of the
@@ -448,8 +500,8 @@ pub fn pool_stock(res: &HashMap<String, f64>, p: StorageClass) -> f64 {
 /// taper to `STORAGE_THROTTLE_FLOOR` at capacity. Port of
 /// `storage_throttle` (the feedback loop that made storage buy real output
 /// instead of a higher parking level).
-pub fn storage_throttle(res: &HashMap<String, f64>, pool: StorageClass) -> f64 {
-    let capacity = pool_capacity(pool);
+pub fn storage_throttle(res: &HashMap<String, f64>, pool: StorageClass, tiers: &StorageTiers) -> f64 {
+    let capacity = pool_capacity_tiers(pool, tiers);
     if capacity <= 0.0 {
         return 1.0;
     }
@@ -480,7 +532,7 @@ pub const MAX_OVERFLOW_LOSS_FRACTION: f64 = 0.75;
 /// top of that, tapering as the overage shrinks instead of an instant
 /// cutoff. Gold occupies Vault space but never decays. Tiny remnants are
 /// pruned (the Python floors with `int()`, which is the same spirit).
-pub fn spoil_and_overflow(res: &mut HashMap<String, f64>, dt: f64) {
+pub fn spoil_and_overflow(res: &mut HashMap<String, f64>, dt: f64, tiers: &StorageTiers) {
     if dt <= 0.0 {
         return;
     }
@@ -496,7 +548,7 @@ pub fn spoil_and_overflow(res: &mut HashMap<String, f64>, dt: f64) {
         StorageClass::Other,
         StorageClass::Feed,
     ] {
-        let capacity = pool_capacity(p);
+        let capacity = pool_capacity_tiers(p, tiers);
         if capacity <= 0.0 {
             continue;
         }
@@ -682,7 +734,7 @@ mod tests {
         let mut res = HashMap::new();
         res.insert("Wheat".to_string(), 100.0); // 0.03/day
         res.insert("Logs".to_string(), 100.0); // 0.0
-        spoil_and_overflow(&mut res, 1.0);
+        spoil_and_overflow(&mut res, 1.0, &StorageTiers::default());
         assert!((res["Wheat"] - 97.0).abs() < 1e-9, "wheat should lose 3%: {:?}", res);
         assert_eq!(res["Logs"], 100.0, "logs never spoil");
     }
@@ -696,7 +748,7 @@ mod tests {
         let mut res = HashMap::new();
         res.insert("Wheat".to_string(), 2000.0);
         res.insert("Logs".to_string(), 200.0);
-        spoil_and_overflow(&mut res, 1.0);
+        spoil_and_overflow(&mut res, 1.0, &StorageTiers::default());
         // 2000 wheat: spoilage first (2000*0.97 = 1940), then overflow at
         // min(0.75, 0.03*5 * overage_frac). overage_frac = (1940-840)/1940
         // ≈ 0.567 → overflow_rate 0.15 → daily 0.085 → ~165 lost.
@@ -713,7 +765,7 @@ mod tests {
         res.insert("Gold".to_string(), 5000.0); // vault cap 150, bulk 0.02 → 100 space… still
         res.insert("Wine".to_string(), 100.0); // forces the Other pool over 150 (100*1.0 + 100)
         // Recompute: Other pool space = 5000*0.02 + 100*1.0 = 200 > 150.
-        spoil_and_overflow(&mut res, 1.0);
+        spoil_and_overflow(&mut res, 1.0, &StorageTiers::default());
         assert_eq!(res["Gold"], 5000.0, "Gold never decays");
         assert!(res["Wine"] < 100.0, "Wine in the overflowing vault decays");
     }
@@ -721,21 +773,21 @@ mod tests {
     #[test]
     fn storage_throttle_tapers_by_fill() {
         let empty = HashMap::new();
-        assert_eq!(storage_throttle(&empty, StorageClass::Household), 1.0);
+        assert_eq!(storage_throttle(&empty, StorageClass::Household, &StorageTiers::default()), 1.0);
 
         let mut res = HashMap::new();
         // At the taper start (85% full) production still runs at full rate…
         res.insert("Wheat".to_string(), 840.0 * STORAGE_THROTTLE_START);
-        assert_eq!(storage_throttle(&res, StorageClass::Household), 1.0);
+        assert_eq!(storage_throttle(&res, StorageClass::Household, &StorageTiers::default()), 1.0);
         // …half-way through the taper (92.5% full) it sits at the midpoint
         // between 1.0 and the floor…
         res.insert("Wheat".to_string(), 840.0 * 0.925);
-        let mid = storage_throttle(&res, StorageClass::Household);
+        let mid = storage_throttle(&res, StorageClass::Household, &StorageTiers::default());
         assert!((mid - 0.575).abs() < 1e-9, "linear midpoint expected, got {}", mid);
         // …and at capacity it clamps to the floor.
         res.insert("Wheat".to_string(), 840.0);
         assert!(
-            (storage_throttle(&res, StorageClass::Household) - STORAGE_THROTTLE_FLOOR).abs() < 1e-9
+            (storage_throttle(&res, StorageClass::Household, &StorageTiers::default()) - STORAGE_THROTTLE_FLOOR).abs() < 1e-9
         );
     }
 
@@ -752,7 +804,7 @@ mod tests {
             for _ in 0..200 {
                 convert(&mut res, seconds, 0.1);
                 seconds += 0.1;
-                spoil_and_overflow(&mut res, 0.1);
+                spoil_and_overflow(&mut res, 0.1, &StorageTiers::default());
             }
             let mut v: Vec<(String, f64)> = res.into_iter().collect();
             v.sort_by(|a, b| a.0.cmp(&b.0));
