@@ -1,2 +1,5 @@
 # Rust build output
 /target/
+
+# Local release staging (exes ship via GitHub Releases)
+/dist/
