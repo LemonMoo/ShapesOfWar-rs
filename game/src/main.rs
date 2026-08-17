@@ -17,11 +17,22 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 const MAP_W: i32 = 512;
 const MAP_H: i32 = 320;
-const SEED: u64 = 2024;
 
 /// The generated world, wrapped so the pure `worldgen` module stays Bevy-free.
 #[derive(Resource)]
 struct Terrain(worldgen::WorldMap);
+
+/// The map's render handle + the seed that produced it, so a regenerate can
+/// swap in a fresh world under the same texture.
+#[derive(Resource)]
+struct MapView {
+    handle: Handle<Image>,
+    seed: u64,
+}
+
+/// Marker on the "Regenerate" button.
+#[derive(Component)]
+struct RegenerateButton;
 
 fn biome_base(b: u8) -> (f64, f64, f64) {
     match b {
@@ -94,8 +105,27 @@ fn pixel(map: &worldgen::WorldMap, x: i32, y: i32) -> (f64, f64, f64) {
 }
 
 fn main() {
-    let map = worldgen::generate(MAP_W, MAP_H, SEED);
+    // A different map every launch, and every press of the Regenerate button.
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64 ^ (d.as_secs() as u64).rotate_left(32))
+        .unwrap_or(2024);
+    let map = worldgen::generate(MAP_W, MAP_H, seed);
+    log_map(&map);
 
+    App::new()
+        .add_plugins(DefaultPlugins)
+        .insert_resource(Terrain(map))
+        .insert_resource(MapView {
+            handle: Handle::default(),
+            seed,
+        })
+        .add_systems(Startup, setup)
+        .add_systems(Update, regenerate)
+        .run();
+}
+
+fn log_map(map: &worldgen::WorldMap) {
     println!(
         "worldgen: {}x{}  land={:.1}%  continents={}  river_cells={}  sea_level={:.3}",
         map.w,
@@ -111,16 +141,9 @@ fn main() {
     }
     let s: Vec<String> = hist.iter().map(|(k, v)| format!("{k}:{v}")).collect();
     println!("biomes: {}", s.join("  "));
-
-    App::new()
-        .add_plugins(DefaultPlugins)
-        .insert_resource(Terrain(map))
-        .add_systems(Startup, setup)
-        .run();
 }
 
-fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, terrain: Res<Terrain>) {
-    let map = &terrain.0;
+fn build_image(map: &worldgen::WorldMap) -> Image {
     let (w, h) = (map.w, map.h);
     let mut data = vec![0u8; (w * h * 4) as usize];
     for y in 0..h {
@@ -133,7 +156,7 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, terrain: Res
             data[i + 3] = 255;
         }
     }
-    let image = Image::new(
+    Image::new(
         Extent3d {
             width: w as u32,
             height: h as u32,
@@ -143,16 +166,72 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, terrain: Res
         data,
         TextureFormat::Rgba8UnormSrgb,
         bevy::asset::RenderAssetUsages::default(),
-    );
-    let handle = images.add(image);
+    )
+}
+
+fn setup(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    terrain: Res<Terrain>,
+    mut view: ResMut<MapView>,
+) {
+    let map = &terrain.0;
+    let image = build_image(map);
+    view.handle = images.add(image);
 
     commands.spawn(Camera2d);
     commands.spawn((
         Sprite {
-            image: handle,
-            custom_size: Some(Vec2::new(w as f32, h as f32)),
+            image: view.handle.clone(),
+            custom_size: Some(Vec2::new(map.w as f32, map.h as f32)),
             ..default()
         },
         Transform::from_xyz(0.0, 0.0, 0.0),
     ));
+
+    // Regenerate button, top-left.
+    commands
+        .spawn((
+            Node {
+                width: Val::Px(150.0),
+                height: Val::Px(40.0),
+                position_type: PositionType::Absolute,
+                left: Val::Px(12.0),
+                top: Val::Px(12.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            Button,
+            BackgroundColor(Color::srgba(0.12, 0.15, 0.20, 0.92)),
+            RegenerateButton,
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new("Regenerate"),
+                TextFont {
+                    font_size: FontSize::Px(20.0),
+                    ..default()
+                },
+                TextColor(Color::WHITE),
+            ));
+        });
+}
+
+fn regenerate(
+    interaction: Query<&Interaction, (Changed<Interaction>, With<RegenerateButton>)>,
+    mut images: ResMut<Assets<Image>>,
+    mut terrain: ResMut<Terrain>,
+    mut view: ResMut<MapView>,
+) {
+    if !interaction.iter().any(|i| matches!(i, Interaction::Pressed)) {
+        return;
+    }
+    // A large prime step so each new seed is a genuinely different world.
+    view.seed = view.seed.wrapping_add(0x9E37_79B9_7F4A_7C15).max(1);
+    let map = worldgen::generate(MAP_W, MAP_H, view.seed);
+    log_map(&map);
+    let image = build_image(&map);
+    images.insert(view.handle.id(), image);
+    terrain.0 = map;
 }
