@@ -12,6 +12,8 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
+use eframe::egui;
+
 const REPO: &str = "LemonMoo/ShapesOfWar-rs";
 const RELEASE_API: &str = "https://api.github.com/repos/LemonMoo/ShapesOfWar-rs/releases/latest";
 const GAME_EXE_NAME: &str = "ShapesOfWar.exe";
@@ -141,7 +143,7 @@ struct LauncherApp {
 }
 
 impl eframe::App for LauncherApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
                 UpdateEvent::UpToDate(tag) => {
@@ -186,27 +188,26 @@ impl eframe::App for LauncherApp {
             }
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(28.0);
-                ui.heading("Shapes of War");
-                ui.add_space(6.0);
-                ui.colored_label(self.status_color, &self.status);
-                ui.add_space(16.0);
-                if ui
-                    .add_enabled(
-                        self.play_enabled,
-                        egui::Button::new("Play").min_size(egui::vec2(140.0, 44.0)),
-                    )
-                    .clicked()
-                {
-                    self.play();
-                }
-            });
+        ui.vertical_centered(|ui| {
+            ui.add_space(28.0);
+            ui.heading("Shapes of War");
+            ui.add_space(6.0);
+            ui.colored_label(self.status_color, &self.status);
+            ui.add_space(16.0);
+            if ui
+                .add_enabled(
+                    self.play_enabled,
+                    egui::Button::new("Play").min_size(egui::vec2(140.0, 44.0)),
+                )
+                .clicked()
+            {
+                self.play();
+            }
         });
         // Poll the worker channel even while idle, so status/progress updates
         // land without waiting for input.
-        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(100));
     }
 }
 
