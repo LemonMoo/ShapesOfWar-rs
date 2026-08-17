@@ -1,6 +1,6 @@
 [package]
 name = "shapes_of_war"
-version = "0.0.9"
+version = "0.0.10"
 edition = "2021"
 description = "Shapes of War — the Rust rewrite: a continuous-time 4X."
 
